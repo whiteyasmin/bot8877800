@@ -36,7 +36,7 @@ const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
 const MIN_ENTRY_SECS  = 120;      // 剩余 <4分钟不开新仓 (放宽: 低价入场EV+即使时间短, 4min足够结算)
 const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
-const MIN_ENTRY_ASK   = 0.10;     // Leg1 入场价下限, 深度砸盘时低价=高EV (dumpThreshold已过滤噪声)
+const MIN_ENTRY_ASK   = 0.08;     // 放宽下限: 降低末期深度砸盘时的入场门槛
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
 const MOMENTUM_WINDOW_SEC = 60;            // 短期动量窗口 60秒
 const MOMENTUM_CONTRA_PCT = 0.0010;        // BTC 60s内反方向移动超过 0.10% 才拒绝dump
@@ -715,7 +715,10 @@ export class Hedge15mEngine {
   }
 
   private getMaxEntryAsk(): number {
-    return this.getEffectiveMaxAsk();
+    // 如果剩余时间少于 5 分钟 (300秒) 并且波动大，可以适当允许更高的成本上限至 0.40
+    // 前提是对盈亏比更有把握时
+    let baseMax = this.getEffectiveMaxAsk();
+    return this.secondsLeft < 300 ? Math.min(0.40, baseMax + 0.05) : baseMax;
   }
 
   /** 方向信号不提升入场上限: 低价才是真正的edge */
@@ -1402,7 +1405,8 @@ export class Hedge15mEngine {
                 const candidate = mispricing.candidates[0];
                 if (candidate) {
                   // ── 早期价格过滤: ask低于MIN_ENTRY_ASK时不尝试入场 (避免无用循环) ──
-                  const dynamicMinAsk = elapsed > 660 ? 0.20 : elapsed > 480 ? 0.15 : MIN_ENTRY_ASK;
+                  // 稍微放宽末期的下限，允许低价高胜率单: 10分钟后(>600秒)限制为0.15，末期不再锁死0.20
+                  const dynamicMinAsk = elapsed > 600 ? 0.15 : MIN_ENTRY_ASK;
                   if (candidate.askPrice < dynamicMinAsk) {
                     const skipKey = `minask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
@@ -1583,7 +1587,7 @@ export class Hedge15mEngine {
       dir: dir as "up" | "down",
       askPrice,
       maxEntryAsk,
-      minEntryAsk: rnd.secondsLeft > 660 ? 0.20 : rnd.secondsLeft > 480 ? 0.15 : MIN_ENTRY_ASK,
+      minEntryAsk: rnd.secondsLeft > 600 ? 0.15 : MIN_ENTRY_ASK,
       directionalBias,
     });
     if (!plan.allowed) {
