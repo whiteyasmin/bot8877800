@@ -134,10 +134,16 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
     result.cautionMessage = "near-dual-dump (UP -" + (upDrop * 100).toFixed(1) + "%, DN -" + (downDrop * 100).toFixed(1) + "%)";
   }
 
-  const upValid = oldestUpAsk > 0.10 && upDrop >= dumpThreshold;
-  const downValid = oldestDownAsk > 0.10 && downDrop >= dumpThreshold;
-  const upExtremeDump = upDrop >= dumpThreshold * 1.35;
-  const downExtremeDump = downDrop >= dumpThreshold * 1.35;
+  const upVelocity = classifyDumpVelocity(upDropMs);
+  const dnVelocity = classifyDumpVelocity(downDropMs);
+
+  const effectiveUpThreshold = upVelocity === "fast" ? dumpThreshold * 0.85 : upVelocity === "slow" ? dumpThreshold * 1.5 : dumpThreshold;
+  const effectiveDnThreshold = dnVelocity === "fast" ? dumpThreshold * 0.85 : dnVelocity === "slow" ? dumpThreshold * 1.5 : dumpThreshold;
+
+  const upValid = oldestUpAsk > 0.10 && upDrop >= effectiveUpThreshold;
+  const downValid = oldestDownAsk > 0.10 && downDrop >= effectiveDnThreshold;
+  const upExtremeDump = upDrop >= effectiveUpThreshold * 1.35;
+  const downExtremeDump = downDrop >= effectiveDnThreshold * 1.35;
   const strongDownTrend = trendMomentum <= -trendContraPct && shortMomentum <= -(momentumContraPct * 0.5);
   const strongUpTrend = trendMomentum >= trendContraPct && shortMomentum >= (momentumContraPct * 0.5);
   const alignedDownMove = shortMomentum <= -(momentumContraPct * 1.25) && trendMomentum <= -(trendContraPct * 0.5);
@@ -163,7 +169,6 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
     const downRise = oldestDownAsk > 0.10 ? (downAsk - oldestDownAsk) / oldestDownAsk : 0;
 
     if (upValid && !upRejected) {
-      const upVelocity = classifyDumpVelocity(upDropMs);
       const btcDrop = shortMomentum < 0 ? Math.abs(shortMomentum) : 0;
       const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcDrop);
       const dumpRatio = btcDrop > 0.0001 ? upDrop / btcDrop : Infinity;
@@ -192,7 +197,6 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
     }
 
     if (downValid && !downRejected) {
-      const dnVelocity = classifyDumpVelocity(downDropMs);
       const btcRise = shortMomentum > 0 ? shortMomentum : 0;
       const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcRise);
       const dumpRatio = btcRise > 0.0001 ? downDrop / btcRise : Infinity;

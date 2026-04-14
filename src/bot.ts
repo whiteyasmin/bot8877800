@@ -34,7 +34,7 @@ const DUMP_LOW_PRICE_CUTOFF = 0.22;     // 低价位分界线
 const ENTRY_WINDOW_S  = 660;      // 开局11分钟内监控砸盘, 窗口关闭=ROUND-660=240s=MIN_ENTRY_SECS
 const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
-const MIN_ENTRY_SECS  = 120;      // 剩余 <4分钟不开新仓 (放宽: 低价入场EV+即使时间短, 4min足够结算)
+const MIN_ENTRY_SECS  = 90;       // 把门槛再降低30秒: 即使只剩 1 分半 依然允许开仓如果 Edge 高
 const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
 const MIN_ENTRY_ASK   = 0.08;     // 放宽下限: 降低末期深度砸盘时的入场门槛
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
@@ -48,46 +48,46 @@ const KELLY_WIN_RATE = 0.54;              // Kelly估计胜率 (实盘4W/3L≈57
 const KELLY_FRACTION = 0.5;               // Half-Kelly (避免过度下注)
 const LIMIT_RACE_ENABLED = true;           // 启用 Limit+FAK 赛跑
 const LIMIT_RACE_OFFSET = 0.01;            // limit 挂单价 = ask - offset
-const LIMIT_RACE_FAST_OFFSET = 0.03;       // dump 快速时更激进 (多省1c/份)
-const LIMIT_RACE_TIMEOUT_MS = 900;         // limit 等待上限 ms (900ms: maker 0%fee vs taker 2%fee, 多等300ms值得)
+const LIMIT_RACE_FAST_OFFSET = 0.01;       // dump 快速时更激进 (多省1c/份)
+const LIMIT_RACE_TIMEOUT_MS = 600;         // limit 等待上限 ms缩短至 600ms, 防止被反弹甩下车
 const LIMIT_RACE_POLL_MS = 50;             // 每 50ms 检查一次
 const LIMIT_RACE_FAST_DUMP_THRESHOLD = 0.15; // dump>=15% 视为快速dump
 const DUAL_SIDE_ENABLED = true;            // 启用双侧预挂单做市
-const DUAL_SIDE_SUM_CEILING = 0.97;        // 预挂单目标: 双侧sum ≤ 此值 (0.97: fill@0.35+opp@0.62=0.97→EV+$0.15, 0.93太紧导致挂单离市场30%无法成交)
+const DUAL_SIDE_SUM_CEILING = 0.98;        // 预挂单目标: 双侧sum ≤ 此值 (放宽0.01增加挂单成交率)
 const DUAL_SIDE_OFFSET = 0.02;             // 挂单价 = currentAsk - offset (最少, 实际用动态offset)
 const DUAL_SIDE_REFRESH_MS = 2000;         // 每2秒刷新挂单价格 (3s在快行情中偏移过大)
 const DUAL_SIDE_BUDGET_PCT = 0.25;         // 预挂单仓位 (单侧) - 方向性策略EV+加大仓位
-const DUAL_SIDE_MIN_SECS = 300;            // 剩余≥5min才预挂 (原540太保守, 低价maker成交即使剩5min仍EV+)
-const DUAL_SIDE_MIN_ASK = 0.18;            // 挂单价下限 (与反应入场MIN_ENTRY_ASK对齐)
+const DUAL_SIDE_MIN_SECS = 90;            // 剩余≥5min才预挂 (原540太保守, 低价maker成交即使剩5min仍EV+)
+const DUAL_SIDE_MIN_ASK = 0.08;            // 挂单价下限 (与反应入场MIN_ENTRY_ASK对齐)
 const DUAL_SIDE_MAX_ASK = 0.35;            // 挂单价上限 (≤0.35保证EV+$0.15/share@50%胜率)
 
 const DUAL_SIDE_MIN_DRIFT = 0.04;          // 价格偏移>此值才重挂 (降低更新频率)
-const DUAL_SIDE_MIN_VOL = 0.0012;          // 5分钟BTC波动率下限 (0.12%), 低于此视为微行情不挂单
-const REACTIVE_MIN_VOL = 0.0010;           // reactive路径波动率门槛: 低于0.10%视为噪声, 不追dump
+const DUAL_SIDE_MIN_VOL = 0.0006;          // 5分钟BTC波动率下限 (0.06%), 去除微波行情
+const REACTIVE_MIN_VOL = 0.0005;           // reactive路径波动率门槛: 低于0.05%视为噪声, 适度放宽以防过滤死寂后的变盘
 const DUMP_LOG_THROTTLE_MS = 2000;         // 重复dump日志节流: 同key至少间隔2s
 
 const LIQUIDITY_FILTER_SUM = 1.10;          // UP+DOWN best ask之和>此值 说明spread太大无edge, 不挂预挂单
-const SUM_DIVERGENCE_MAX = 1.03;            // 入场时 upAsk+downAsk > 此值 → 拒绝入场 (sum≥1.03=市场公平定价, 无dump错定价edge)
-const SUM_DIVERGENCE_RELAXED = 1.05;        // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
+const SUM_DIVERGENCE_MAX = 1.10;            // 入场时 upAsk+downAsk > 此值 → 拒绝入场 (sum≥1.03=市场公平定价, 无dump错定价edge)
+const SUM_DIVERGENCE_RELAXED = 1.12;        // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
 const SUM_DIVERGENCE_MIN = 0.85;            // 入场时 upAsk+downAsk < 此值 → 方向性强、砸盘更可信
 const DUMP_CONFIRM_CYCLES = 1;              // 连续 N 个循环看到 dump 才触发入场 (1: dumpThreshold已过滤噪声, 无需多次确认)
 const MIN_ENTRY_ELAPSED = 30;               // 回合开始至少30s后才允许反应式入场 (30s数据已足够稳定)
 const TREND_BUDGET_BOOST = 0.03;            // 趋势一致在Kelly基础上再加3%
 const TREND_BUDGET_CUT = 0.02;              // 方向中性时在Kelly基础上减2%
 const MIN_NET_EDGE = 0.05;                  // net edge <8% 不做
-const NON_FLAT_MIN_NET_EDGE = 0.08;         // 非flat也提高到10%, 过滤边际噪声单
-const FLAT_MIN_NET_EDGE = 0.10;             // flat行情抬高到12%, 降低噪声入场
+const NON_FLAT_MIN_NET_EDGE = 0.06;         // 非flat也提高到6%, 过滤边际噪声单
+const FLAT_MIN_NET_EDGE = 0.08;             // flat行情抬高到8%, 降低噪声入场
 const REACTIVE_MIN_ALIGNMENT_SCORE = 1;     // 盘口信号质量门槛: aligned-contra >= 1
-const REACTIVE_ALIGNMENT_EDGE_OVERRIDE = 0.20; // edge≥20%时允许越过信号门槛
-const MID_NET_EDGE = 0.15;                  // 8%~15% 小仓
-const HIGH_NET_EDGE = 0.25;                 // 15%~25% 正常仓, >25% 强信号仓
+const REACTIVE_ALIGNMENT_EDGE_OVERRIDE = 0.12; // edge≥12%时允许越过信号门槛
+const MID_NET_EDGE = 0.10;                  // 8%~15% 小仓
+const HIGH_NET_EDGE = 0.18;                 // 15%~25% 正常仓, >25% 强信号仓
 const BALANCE_ESTIMATE_MIN_PCT = 0.70;
 const BALANCE_ESTIMATE_MAX_PCT = 1.15;
 
 // ── 资金安全守护 ──
 const MIN_BALANCE_TO_TRADE = 5;             // 余额<$5停止交易 (不够开最小仓)
 const MAX_SESSION_LOSS_PCT = 0.35;          // 单次会话亏损超过初始资金35%→暂停交易 (更早止损保留本金)
-const CONSECUTIVE_LOSS_PAUSE = 3;           // 连续亏损5次→暂停1轮冷静期 (更快适应市场regime变化)
+const CONSECUTIVE_LOSS_PAUSE = 5;           // 连续亏损5次→暂停1轮冷静期 (更快适应市场regime变化)
 
 export type PaperSessionMode = "session" | "persistent";
 
@@ -670,16 +670,15 @@ export class Hedge15mEngine {
     if (effectiveEdge < dynamicMinEdge) {
       return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
     }
-    // Doji检测: 用 |ln(S/K)| (BTC偏离幅度) 而非 |d| (σ√T归一化后的值)
-    // 15分钟期权σ√T≈0.003, BTC偏$15→|d|=0.06但|ln(S/K)|=0.00015
-    // 旧阈值|d|<0.05误杀: BTC偏$10就触发doji (砸盘场景BTC可能确实没大动)
-    // 新阈值: |ln(S/K)|<0.0001 (BTC偏<0.01%≈$10) 才是真doji
-    if (lnMoneyness < 0.0001 && effectiveEdge < 0.18) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "doji-net-edge<18%" };
+    // Doji检测: BTC偏<0.01%≈$10 才是真doji
+    const dojiEdge = secsLeft < 300 ? 0.05 : 0.10;
+    if (lnMoneyness < 0.0001 && effectiveEdge < dojiEdge) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `doji-net-edge<${(dojiEdge*100).toFixed(0)}%` };
     }
     // near-doji: BTC偏<0.03% (≈$30) — 方向不明确, 要求更高edge
-    if (lnMoneyness < 0.0003 && effectiveEdge < 0.12) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "near-doji-net-edge<12%" };
+    const nearDojiEdge = secsLeft < 300 ? 0.03 : 0.06;
+    if (lnMoneyness < 0.0003 && effectiveEdge < nearDojiEdge) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `near-doji-net-edge<${(nearDojiEdge*100).toFixed(0)}%` };
     }
 
     return { allowed: true, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "ok" };
