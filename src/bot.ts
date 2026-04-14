@@ -35,7 +35,7 @@ const ENTRY_WINDOW_S  = 660;      // 开局11分钟内监控砸盘, 窗口关闭
 const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
 const MIN_ENTRY_SECS  = 90;       // 把门槛再降低30秒: 即使只剩 1 分半 依然允许开仓如果 Edge 高
-const MAX_ENTRY_ASK   = 0.45;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
+const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
 const MIN_ENTRY_ASK   = 0.08;     // 放宽下限: 降低末期深度砸盘时的入场门槛
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
 const MOMENTUM_WINDOW_SEC = 60;            // 短期动量窗口 60秒
@@ -721,8 +721,17 @@ export class Hedge15mEngine {
   }
 
   /** 方向信号不提升入场上限: 低价才是真正的edge */
-  private getDynamicMaxEntryAsk(_entryDir?: string): number {
-    return this.getMaxEntryAsk();
+  private getDynamicMaxEntryAsk(entryDir?: string): number {
+    const baseMax = this.getMaxEntryAsk(); // <= 0.35
+    if (!entryDir) return 0.28;
+    
+    const bias = this.getRoundDirectionalBias();
+    
+    // 狙击手+推土机融合: 顺势才允许高价 (0.35)，逆势/震荡压低到0.26
+    if (bias === entryDir) {
+      return baseMax;
+    }
+    return 0.26;
   }
 
   private getRoundPhase(): string {
@@ -1414,11 +1423,11 @@ export class Hedge15mEngine {
                     }
                   }
                   // ── 早期价格过滤: ask高于MAX_ENTRY_ASK时不尝试 ──
-                  else if (candidate.askPrice > this.getMaxEntryAsk()) {
+                  else if (candidate.askPrice > this.getDynamicMaxEntryAsk(candidate.dir)) {
                     const skipKey = `maxask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
                       this.lastEntrySkipKey = skipKey;
-                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > MAX_ENTRY_ASK=${this.getMaxEntryAsk()}`);
+                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > DYN_MAX=${this.getMaxEntryAsk()}`);
                     }
                     this.roundEntryAskRejects += 1;
                   }

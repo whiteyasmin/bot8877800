@@ -28,13 +28,17 @@ export function planHedgeEntry(input: HedgeEntryPlanInput): EntryPlanResult {
   if (askPrice < minEntryAsk) {
     return { allowed: false, reason: `ask=${askPrice.toFixed(2)} < MIN_ENTRY_ASK=${minEntryAsk}` };
   }
-  // BTC方向逆向拒绝: 市场重定价而非砸盘 (例: BTC跌时买UP=买反)
-  // 仅在偏差直接对立时拒绝, flat不阻止
-  if (false && directionalBias === "down" && dir === "up") {
-    return { allowed: false, reason: `BTC偏向DOWN但买UP — 重定价而非砸盘` };
+  // BTC方向逆向过滤: 狙击手+推土机融合
+  // 顺势可以不管，但如果是逆向(BTC跌时买UP=接飞刀)，只允许在价格极便宜(<=0.22)时接盘
+  if (directionalBias === "down" && dir === "up") {
+    if (askPrice > 0.22) {
+      return { allowed: false, reason: `逆势(BTC向下买UP)且价格${askPrice.toFixed(2)}>0.22, 拒绝推土机高频损耗` };
+    }
   }
-  if (false && directionalBias === "up" && dir === "down") {
-    return { allowed: false, reason: `BTC偏向UP但买DOWN — 重定价而非砸盘` };
+  if (directionalBias === "up" && dir === "down") {
+    if (askPrice > 0.22) {
+      return { allowed: false, reason: `逆势(BTC向上买DOWN)且价格${askPrice.toFixed(2)}>0.22, 拒绝推土机高频损耗` };
+    }
   }
   return { allowed: true };
 }
