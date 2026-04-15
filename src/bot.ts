@@ -34,9 +34,9 @@ const DUMP_LOW_PRICE_CUTOFF = 0.22;     // 低价位分界线
 const ENTRY_WINDOW_S  = 660;      // 开局11分钟内监控砸盘, 窗口关闭=ROUND-660=240s=MIN_ENTRY_SECS
 const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
-const MIN_ENTRY_SECS  = 90;       // 把门槛再降低30秒: 即使只剩 1 分半 依然允许开仓如果 Edge 高
+const MIN_ENTRY_SECS  = 60;       // 把门槛进一步降低到最后1分钟: 只要盈亏比足够高，且有毒性单速斩机制保护，最后时刻照样接单
 const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
-const MIN_ENTRY_ASK   = 0.08;     // 放宽下限: 降低末期深度砸盘时的入场门槛
+const MIN_ENTRY_ASK   = 0.05;     // 极限放宽下限: 有了严格止损护航，完全可以承接极端的 $0.05 带血恐慌筹码
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
 const MOMENTUM_WINDOW_SEC = 60;            // 短期动量窗口 60秒
 const MOMENTUM_CONTRA_PCT = 0.0010;        // BTC 60s内反方向移动超过 0.10% 才拒绝dump
@@ -57,8 +57,8 @@ const DUAL_SIDE_SUM_CEILING = 0.98;        // 预挂单目标: 双侧sum ≤ 此
 const DUAL_SIDE_OFFSET = 0.02;             // 挂单价 = currentAsk - offset (最少, 实际用动态offset)
 const DUAL_SIDE_REFRESH_MS = 2000;         // 每2秒刷新挂单价格 (3s在快行情中偏移过大)
 const DUAL_SIDE_BUDGET_PCT = 0.25;         // 预挂单仓位 (单侧) - 方向性策略EV+加大仓位
-const DUAL_SIDE_MIN_SECS = 90;            // 剩余≥5min才预挂 (原540太保守, 低价maker成交即使剩5min仍EV+)
-const DUAL_SIDE_MIN_ASK = 0.08;            // 挂单价下限 (与反应入场MIN_ENTRY_ASK对齐)
+const DUAL_SIDE_MIN_SECS = 60;            // 把预挂单继续延迟到最后1分钟 (有BSM立即平仓护航)
+const DUAL_SIDE_MIN_ASK = 0.05;            // 探底极端行情，迎接 $0.05 的大甩卖
 const DUAL_SIDE_MAX_ASK = 0.35;            // 挂单价上限 (≤0.35保证EV+$0.15/share@50%胜率)
 
 const DUAL_SIDE_MIN_DRIFT = 0.04;          // 价格偏移>此值才重挂 (降低更新频率)
@@ -86,8 +86,8 @@ const BALANCE_ESTIMATE_MAX_PCT = 1.15;
 
 // ── 资金安全守护 ──
 const MIN_BALANCE_TO_TRADE = 5;             // 余额<$5停止交易 (不够开最小仓)
-const MAX_SESSION_LOSS_PCT = 0.35;          // 单次会话亏损超过初始资金35%→暂停交易 (更早止损保留本金)
-const CONSECUTIVE_LOSS_PAUSE = 5;           // 连续亏损5次→暂停1轮冷静期 (更快适应市场regime变化)
+const MAX_SESSION_LOSS_PCT = 0.35;          // 单次会话亏损超过初始资金35%→暂停交易
+const CONSECUTIVE_LOSS_PAUSE = 9;           // 因为引入了良性微亏止损(Unwind)，连亏阈值放宽到9次，防止正常风控被当成市场失效惩罚
 
 export type PaperSessionMode = "session" | "persistent";
 
