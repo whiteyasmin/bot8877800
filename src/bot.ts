@@ -2169,15 +2169,14 @@ export class Hedge15mEngine {
     observedSum = 0,
   ): Promise<void> {
     const bsEntry = this.evaluateBsEntry(dir, fillPrice, this.secondsLeft, "dual-side");
-    // 低价maker成交不做post-fill BSM unwind:
-    // fillPrice ≤ $0.30 时 EV+ ≥ $0.20/share @50%胜率, unwind需付2% taker fee = 确定损失
-    // BSM在成交后数百ms内可能因BTC微幅反转而翻转判断, 此时unwind是EV-
-    // 仅在高价成交(>$0.30)时才允许unwind — 高价的EV margin小, 方向错误代价大
-    if (!bsEntry.allowed && fillPrice > 0.30) {
+    // 任何价位成交如果被BSM拒绝都应该平仓，价格低不等于 EV+，
+    // 因为真实胜率(如5%)不支持哪怕 $0.20 的成本，必须严格止损以保持盈亏率。
+    if (!bsEntry.allowed) {
       this.logBsReject("dual-side-fill", dir, fillPrice, bsEntry);
       const unwind = await trader.placeFakSell(leg1Token, filledShares, this.negRisk).catch(() => null);
       if (unwind) {
         this.leg1AttemptedThisRound = true;
+        this.hedgeState = "done"; // 防止后续 reactive 逻辑重复判断导致刷屏或强入
         this.activeStrategyMode = "none";
         this.status = `预挂成交后立即平仓: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} x${filledShares.toFixed(0)}`;
         logger.warn(`DUAL SIDE UNWIND: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} rejected by BSM, sold immediately`);
@@ -2194,9 +2193,6 @@ export class Hedge15mEngine {
         return;
       }
       logger.error(`DUAL SIDE UNWIND FAILED: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} — keeping position to settlement`);
-    } else if (!bsEntry.allowed) {
-      // 低价成交: BSM reject但不unwind, 持有到结算仍EV+
-      logger.info(`DUAL SIDE KEEP: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} BSM rejected (${bsEntry.reason}) but fillPrice ≤ $0.30 — holding to settlement (EV+ at low price)`);
     }
 
     this.hedgeState = "leg1_filled";
