@@ -48,7 +48,7 @@ const KELLY_WIN_RATE = 0.54;              // Kelly估计胜率 (实盘4W/3L≈57
 const KELLY_FRACTION = 0.5;               // Half-Kelly (避免过度下注)
 const LIMIT_RACE_ENABLED = true;           // 启用 Limit+FAK 赛跑
 const LIMIT_RACE_OFFSET = 0.01;            // limit 挂单价 = ask - offset
-const LIMIT_RACE_FAST_OFFSET = 0.01;       // dump 快速时更激进 (多省1c/份)
+const LIMIT_RACE_FAST_OFFSET = 0.02;       // dump 快速时更激进 (多省1c/份)
 const LIMIT_RACE_TIMEOUT_MS = 600;         // limit 等待上限 ms缩短至 600ms, 防止被反弹甩下车
 const LIMIT_RACE_POLL_MS = 50;             // 每 50ms 检查一次
 const LIMIT_RACE_FAST_DUMP_THRESHOLD = 0.15; // dump>=15% 视为快速dump
@@ -1313,6 +1313,18 @@ export class Hedge15mEngine {
 
         const elapsed = ROUND_DURATION - secs;
 
+        // ── 1. 挂单防毒保护 (Toxic Flow Circuit Breaker) ──
+        const shortVolume3s = Math.abs(getRecentMomentum(3));
+        if (shortVolume3s > 0.0005) { // 3秒波动 > 0.05%
+          if (this.preOrderUpId || this.preOrderDownId) {
+            logger.warn(`【防毒断路器触发】3秒内BTC剧烈波动 ${(shortVolume3s*100).toFixed(3)}% > 0.05%，紧急撤回所有预挂单防御！`);
+            await this.cancelDualSideOrders(trader);
+          }
+          // 哪怕只做反应式入场，也要避开暴涨暴跌的毒流前3秒，让高频玩家先踩雷
+          await sleep(Math.max(500, LIMIT_RACE_POLL_MS));
+          continue; 
+        }
+
         // ═══ State Machine ═══
 
         if (this.hedgeState === "watching") {
@@ -1337,7 +1349,7 @@ export class Hedge15mEngine {
 
               // 低价位动态降低dump阈值: ask已经便宜时不需等大跌幅
               const lowestAsk = Math.min(this.upAsk, this.downAsk);
-              const effectiveDumpThreshold = lowestAsk <= DUMP_LOW_PRICE_CUTOFF ? DUMP_THRESHOLD_LOW_PRICE : DUMP_THRESHOLD;
+              let effectiveDumpThreshold = lowestAsk <= DUMP_LOW_PRICE_CUTOFF ? DUMP_THRESHOLD_LOW_PRICE : DUMP_THRESHOLD;                if (secs < 300) effectiveDumpThreshold = 0.04;
 
               const mispricing = evaluateMispricingOpportunity({
                 upAsk: this.upAsk,
@@ -2364,7 +2376,8 @@ export class Hedge15mEngine {
     }
 
     const entryAsk = orderbookPlan.entryAsk;
-    const entryShares = Math.min(MAX_SHARES, Math.floor(budget / entryAsk));
+    const allowedByOrderbook = orderbookPlan.suggestedShares ?? MAX_SHARES;
+    const entryShares = Math.min(MAX_SHARES, Math.floor(budget / entryAsk), allowedByOrderbook);
     if (entryShares < MIN_SHARES) {
       this.trackRoundRejectReason(`fresh shares ${entryShares} < ${MIN_SHARES}`);
       logger.warn(`Hedge15m Leg1 skipped (fresh): ${entryShares}份 < ${MIN_SHARES} @${entryAsk.toFixed(2)}`);
@@ -2383,10 +2396,10 @@ export class Hedge15mEngine {
       // ── Limit race offset + timeout: 按dump速度动态化 ──
       // 慢dump(8-12%): 价格回弹慢→maker成交概率高→等久点+小offset
       // 快dump(>15%): 价格恢复快→缩短等待+大offset抢成交
-      let limitOffset = LIMIT_RACE_OFFSET;
+      let limitOffset = Math.max(0.005, entryAsk * 0.05);
       let raceTimeout = LIMIT_RACE_TIMEOUT_MS;
       if (this.currentDumpDrop >= LIMIT_RACE_FAST_DUMP_THRESHOLD || this.currentDumpVelocity === "fast") {
-        limitOffset = LIMIT_RACE_FAST_OFFSET;
+        limitOffset = Math.max(0.01, entryAsk * 0.10);
         raceTimeout = 600;  // 快dump/快速度: 缩到600ms, 尽快成交
       } else if (this.currentDumpDrop < 0.12 && this.currentDumpVelocity === "slow") {
         raceTimeout = 1200; // 慢dump+慢速度: 等久点, maker成交概率更高
