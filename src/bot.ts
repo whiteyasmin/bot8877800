@@ -185,6 +185,11 @@ export interface Hedge15mState {
   rtMaxEntryAsk: number;
   rtDualSideMaxAsk: number;
   rtKellyFraction: number;
+  rtDumpThreshold?: string;
+  rtNetEdgeMin?: string;
+  rtToxicBlockPbs?: string;
+  rtSlippagePct?: string;
+  rtDepthLimitPct?: string;
   latencyP50: number;
   latencyP90: number;
   latencyNetworkSource: string;
@@ -883,6 +888,11 @@ export class Hedge15mEngine {
       rtMaxEntryAsk: this.rtMaxEntryAsk,
       rtDualSideMaxAsk: this.rtDualSideMaxAsk,
       rtKellyFraction: this.rtKellyFraction,
+      rtDumpThreshold: this.secondsLeft < 300 ? "4%" : "8-12%",
+      rtNetEdgeMin: this.currentTrendBias === "flat" ? "8%" : "6%",
+      rtToxicBlockPbs: ">0.25% (3s)",
+      rtSlippagePct: this.secondsLeft < 30 ? "50ps" : "0.5c",
+      rtDepthLimitPct: this.secondsLeft < 60 ? "2.5%" : "30%",
       latencyP50: dp.p50,
       latencyP90: dp.p90,
       latencyNetworkSource: latency.networkSource,
@@ -1315,9 +1325,9 @@ export class Hedge15mEngine {
 
         // ── 1. 挂单防毒保护 (Toxic Flow Circuit Breaker) ──
         const shortVolume3s = Math.abs(getRecentMomentum(3));
-        if (shortVolume3s > 0.0005) { // 3秒波动 > 0.05%
+          if (shortVolume3s > 0.0025) { // 3秒剧烈波动 > 0.25% (+)
           if (this.preOrderUpId || this.preOrderDownId) {
-            logger.warn(`【防毒断路器触发】3秒内BTC剧烈波动 ${(shortVolume3s*100).toFixed(3)}% > 0.05%，紧急撤回所有预挂单防御！`);
+            logger.warn(`【防毒断路器触发】3秒内BTC剧烈波动 ${(shortVolume3s*100).toFixed(3)}% > 0.25%，紧急撤回所有预挂单防御！`);
             await this.cancelDualSideOrders(trader);
           }
           // 哪怕只做反应式入场，也要避开暴涨暴跌的毒流前3秒，让高频玩家先踩雷
