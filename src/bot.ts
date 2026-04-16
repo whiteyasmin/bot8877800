@@ -409,6 +409,7 @@ export class Hedge15mEngine {
   private _volGateLoggedThisRound = false;  // 去重: 波动率门控日志每轮只打一次
   private _earlyEntryLoggedThisRound = false; // 去重: EARLY日志每轮只打一次
   private _holdReversalLogged = false;       // 去重: 持仓反转警告每轮只打一次
+  private _botStartedAt = 0;                 // bot启动时间戳, 用于startup warmup guard
   private dirAlignedScore = 0;              // 入场时方向一致信号加权分 (8源)
   private dirContraScore = 0;               // 入场时方向反向信号加权分 (8源)
   private consecutiveLosses = 0;            // 连续亏损计数 (资金安全守护)
@@ -1133,6 +1134,7 @@ export class Hedge15mEngine {
     }
 
     this.savePaperRuntimeSnapshot();
+    this._botStartedAt = Date.now();
 
     logger.info(`Hedge15m started (${this.tradingMode}), balance=$${this.balance.toFixed(2)}`);
 
@@ -1695,6 +1697,17 @@ export class Hedge15mEngine {
 
     // ── 统计7源信号对齐度 ──
     this.computeSignalAlignment(dir);
+
+    // ── 启动保护: bot 启动不足 120s 时 BSM vol 样本太少，概率估算失真 ──
+    const botUptimeMs = Date.now() - this._botStartedAt;
+    if (this._botStartedAt > 0 && botUptimeMs < 120_000) {
+      this.trackRoundRejectReason(`startup-warmup: ${Math.floor(botUptimeMs / 1000)}s < 120s`);
+      if (!this._volGateLoggedThisRound) {
+        this._volGateLoggedThisRound = true;
+        logger.info(`HEDGE15M STARTUP GUARD: bot running ${Math.floor(botUptimeMs / 1000)}s < 120s — BSM unreliable, skip reactive`);
+      }
+      return;
+    }
 
     // ── 低波过滤: reactive在微行情中噪声极高, 直接跳过 ──
     const reactiveVol = getRecentVolatility(300);
