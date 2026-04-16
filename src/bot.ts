@@ -1726,8 +1726,8 @@ export class Hedge15mEngine {
     } else if (this.secondsLeft > 600) {
       minEdgeForRegime += 0.02;
     }
-    // 信号共识微调: 每 1 分 score 降/升 0.5% 门槛，夹紧到 [3%, 12%]
-    minEdgeForRegime = Math.min(0.12, Math.max(0.03, minEdgeForRegime - alignmentScore * 0.005));
+    // 信号共识微调: 每 1 分 score 降/升 0.3% 门槛，夹紧到 [3%, 12%]
+    minEdgeForRegime = Math.min(0.12, Math.max(0.03, minEdgeForRegime - alignmentScore * 0.003));
     if (bsEdgeNet < minEdgeForRegime) {
       this.trackRoundRejectReason(`regime-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(minEdgeForRegime * 100).toFixed(1)}% sig=${alignmentScore.toFixed(1)}`);
       const skipKey = `regime-edge:${dir}:${directionalBias}:${askPrice.toFixed(2)}:${Math.floor(bsEdgeNet * 1000)}`;
@@ -2056,9 +2056,9 @@ export class Hedge15mEngine {
     // 信号共识 >= 2.5 时也视为有方向，即使 bias 仍 flat
     const signalFavorsDown = trend === "down" || (trend === "flat" && dnSignalScore >= 2.5 && upSignalScore < 1.0);
     const signalFavorsUp = trend === "up" || (trend === "flat" && upSignalScore >= 2.5 && dnSignalScore < 1.0);
-    // 强反向信号阻止新挂单: score <= -2.0 说明该方向信号严重矛盾，不值得挂单承担被错误成交风险
-    const upSignalBlocked = upSignalScore <= -2.0;
-    const dnSignalBlocked = dnSignalScore <= -2.0;
+    // 强反向信号阻止新挂单: 仅在极端矛盾 (<= -3.5) 时才阻止，避免 dual-side 双向对冲策略被轻易打掉
+    const upSignalBlocked = upSignalScore <= -3.5;
+    const dnSignalBlocked = dnSignalScore <= -3.5;
     if ((signalFavorsDown || upSignalBlocked) && this.preOrderUpId) {
       await trader.cancelOrder(this.preOrderUpId).catch(() => {});
       this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
