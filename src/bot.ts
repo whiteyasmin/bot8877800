@@ -410,6 +410,10 @@ export class Hedge15mEngine {
   private _earlyEntryLoggedThisRound = false; // 去重: EARLY日志每轮只打一次
   private _holdReversalLogged = false;       // 去重: 持仓反转警告每轮只打一次
   private _botStartedAt = 0;                 // bot启动时间戳, 用于startup warmup guard
+  private _signalFavorsDownSince = 0;        // signalFavorsDown 持续起点 ts (撤 UP 预挂单冷却)
+  private _signalFavorsUpSince = 0;          // signalFavorsUp 持续起点 ts (撤 DOWN 预挂单冷却)
+  private _upSignalBlockedSince = 0;         // upSignalBlocked 持续起点 ts
+  private _dnSignalBlockedSince = 0;         // dnSignalBlocked 持续起点 ts
   private dirAlignedScore = 0;              // 入场时方向一致信号加权分 (8源)
   private dirContraScore = 0;               // 入场时方向反向信号加权分 (8源)
   private consecutiveLosses = 0;            // 连续亏损计数 (资金安全守护)
@@ -756,9 +760,25 @@ export class Hedge15mEngine {
     return this.getEffectiveMaxAsk();
   }
 
-  /** 方向信号不提升入场上限: 低价才是真正的edge */
-  private getDynamicMaxEntryAsk(_entryDir?: string): number {
-    return this.getMaxEntryAsk();
+  /**
+   * 趋势对齐时放宽入场上限: 强趋势行情中赢家一侧 ask 会远超 $0.30，
+   * 硬顶会把我们锁在场外。
+   * - trendFollow=true 时 (reactive 流的零和重定价捕捉): 放宽到 $0.85
+   * - 否则当 buy 方向与 BTC 严格对齐 + 信号共识时放宽到 $0.70
+   */
+  private getDynamicMaxEntryAsk(entryDir?: string, trendFollow = false): number {
+    const base = this.getMaxEntryAsk();
+    if (trendFollow) return 0.85;
+    if (!entryDir) return base;
+    const btcMove = getBtcMovePct();
+    if (btcMove < 0.0015) return base; // BTC 移动不足 0.15%, 不认为是强趋势
+    const btcDir = getBtcDirection();
+    if (entryDir !== btcDir) return base; // 逆 BTC 方向仍用严格上限
+    // 方向一致时再用加权信号共识二次确认
+    this.computeSignalAlignment(entryDir as "up" | "down");
+    const sigNet = this.dirAlignedScore - this.dirContraScore;
+    if (sigNet < 1.5) return base;
+    return 0.70;
   }
 
   private getRoundPhase(): string {
@@ -1445,7 +1465,7 @@ export class Hedge15mEngine {
                     this.currentDumpVelocity = bestCandidate.dumpVelocity;
                     this.activeStrategyMode = "mispricing";
                     const buyToken = rnd[bestCandidate.buyTokenKey];
-                    await this.buyLeg1(trader, rnd, bestCandidate.dir, bestCandidate.askPrice, buyToken);
+                    await this.buyLeg1(trader, rnd, bestCandidate.dir, bestCandidate.askPrice, buyToken, !!bestCandidate.trendFollow);
                   } else {
                     logger.warn(`HEDGE15M SKIP: both dump candidate ${bestCandidate.dir.toUpperCase()} @${bestCandidate.askPrice.toFixed(2)} outside ask range`);
                   }
@@ -1482,8 +1502,10 @@ export class Hedge15mEngine {
 
                 const candidate = mispricing.candidates[0];
                 if (candidate) {
-                  // ── 动态价格下限: 早期数据不稳用较高 floor，末期放宽抓 EV+ ──
-                  const dynamicMinAsk = elapsed < 180 ? 0.18 : elapsed < 480 ? 0.12 : MIN_ENTRY_ASK;
+                  // trend-follow 跳过动态下限(价格必在 0.30+)并放宽 maxAsk 到 $0.85
+                  const effectiveMaxAsk = this.getDynamicMaxEntryAsk(candidate.dir, !!candidate.trendFollow);
+                  // ── 动态价格下限: 早期数据不稳用较高 floor，末期放宽抓 EV+ (trend-follow 不适用) ──
+                  const dynamicMinAsk = candidate.trendFollow ? 0 : (elapsed < 180 ? 0.18 : elapsed < 480 ? 0.12 : MIN_ENTRY_ASK);
                   if (candidate.askPrice < dynamicMinAsk) {
                     const skipKey = `minask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
@@ -1491,12 +1513,12 @@ export class Hedge15mEngine {
                       logger.warn(`Hedge15m Leg1 skipped (dynamic floor): ask=${candidate.askPrice.toFixed(2)} < floor=${dynamicMinAsk} (elapsed=${Math.floor(elapsed)}s)`);
                     }
                   }
-                  // ── 早期价格过滤: ask高于MAX_ENTRY_ASK时不尝试 ──
-                  else if (candidate.askPrice > this.getMaxEntryAsk()) {
+                  // ── 早期价格过滤: ask高于 effectiveMaxAsk 时不尝试 ──
+                  else if (candidate.askPrice > effectiveMaxAsk) {
                     const skipKey = `maxask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
                       this.lastEntrySkipKey = skipKey;
-                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > MAX_ENTRY_ASK=${this.getMaxEntryAsk()}`);
+                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > MAX_ENTRY_ASK=${effectiveMaxAsk}${candidate.trendFollow ? " (trend-follow)" : ""}`);
                     }
                     this.roundEntryAskRejects += 1;
                   }
@@ -1521,12 +1543,12 @@ export class Hedge15mEngine {
                     if (!signalFastTrack && this.dumpConfirmCount < this.rtDumpConfirmCycles) {
                       // 还未达到确认次数且信号不够强, 继续等
                     } else {
-                      // ── #2 Sum分歧度过滤: 市场不确定时拒绝入场 ──
+                      // ── #2 Sum分歧度过滤: 市场不确定时拒绝入场 (trend-follow 不适用, 趋势行情 sum≈1.0 正常) ──
                       const currentSum = this.upAsk + this.downAsk;
                       const candDrop = candidate.dir === "up" ? dumpBaseline.upDrop : dumpBaseline.downDrop;
                       // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
                       const effectiveSumMax = candDrop >= 0.12 ? SUM_DIVERGENCE_RELAXED : SUM_DIVERGENCE_MAX;
-                      if (currentSum > effectiveSumMax) {
+                      if (!candidate.trendFollow && currentSum > effectiveSumMax) {
                         this.trackRoundRejectReason(`sum_high: ${currentSum.toFixed(2)} > ${effectiveSumMax}`);
                         const sumKey = currentSum.toFixed(2);
                         if (sumKey !== this.lastDumpLogKey) {
@@ -1556,6 +1578,7 @@ export class Hedge15mEngine {
                           candidate.dir,
                           candidate.askPrice,
                           rnd[candidate.buyTokenKey],
+                          !!candidate.trendFollow,
                         );
                       }
                     }
@@ -1661,6 +1684,7 @@ export class Hedge15mEngine {
     dir: string,
     askPrice: number,
     buyToken: string,
+    trendFollow = false,
   ): Promise<void> {
     if (this.hedgeState !== "watching" || this.leg1EntryInFlight) return;
     if (this.leg1AttemptedThisRound) {
@@ -1672,15 +1696,15 @@ export class Hedge15mEngine {
       return;
     }
 
-    // ── Leg1价格上限: 只接受足够低价的EV+入场, 强信号时动态提升 ──
-    const maxEntryAsk = this.getDynamicMaxEntryAsk(dir);
+    // ── Leg1价格上限: trend-follow 放宽到 $0.85, 其他场景按原逻辑 ──
+    const maxEntryAsk = this.getDynamicMaxEntryAsk(dir, trendFollow);
     const directionalBias = this.getRoundDirectionalBias();
 
     const plan = planHedgeEntry({
       dir: dir as "up" | "down",
       askPrice,
       maxEntryAsk,
-      minEntryAsk: rnd.secondsLeft > 720 ? 0.18 : rnd.secondsLeft > 420 ? 0.12 : MIN_ENTRY_ASK,
+      minEntryAsk: trendFollow ? 0 : (rnd.secondsLeft > 720 ? 0.18 : rnd.secondsLeft > 420 ? 0.12 : MIN_ENTRY_ASK),
       directionalBias,
     });
     if (!plan.allowed) {
@@ -2066,21 +2090,54 @@ export class Hedge15mEngine {
     const upSignalScore = this.dirAlignedScore - this.dirContraScore;
     this.computeSignalAlignment("down");
     const dnSignalScore = this.dirAlignedScore - this.dirContraScore;
-    // 信号共识 >= 2.5 时也视为有方向，即使 bias 仍 flat
-    const signalFavorsDown = trend === "down" || (trend === "flat" && dnSignalScore >= 2.5 && upSignalScore < 1.0);
-    const signalFavorsUp = trend === "up" || (trend === "flat" && upSignalScore >= 2.5 && dnSignalScore < 1.0);
+    // 信号共识 >= 3.5 时才视为强方向 (原 2.5 太敏感, 噪声触发大量预挂单振荡)
+    const signalFavorsDown = trend === "down" || (trend === "flat" && dnSignalScore >= 3.5 && upSignalScore < 1.0);
+    const signalFavorsUp = trend === "up" || (trend === "flat" && upSignalScore >= 3.5 && dnSignalScore < 1.0);
     // 强反向信号阻止新挂单: 仅在极端矛盾 (<= -3.5) 时才阻止，避免 dual-side 双向对冲策略被轻易打掉
     const upSignalBlocked = upSignalScore <= -3.5;
     const dnSignalBlocked = dnSignalScore <= -3.5;
-    if ((signalFavorsDown || upSignalBlocked) && this.preOrderUpId) {
+
+    // ── 撤单冷却: 信号翻转 / BLOCK 必须持续 ≥ 5s 才撤, 防止瞬时噪声导致 place→cancel 振荡 ──
+    const SIGNAL_FLIP_COOLDOWN_MS = 5000;
+    const tsNow = Date.now();
+    if (signalFavorsDown) {
+      if (this._signalFavorsDownSince === 0) this._signalFavorsDownSince = tsNow;
+    } else {
+      this._signalFavorsDownSince = 0;
+    }
+    if (signalFavorsUp) {
+      if (this._signalFavorsUpSince === 0) this._signalFavorsUpSince = tsNow;
+    } else {
+      this._signalFavorsUpSince = 0;
+    }
+    if (upSignalBlocked) {
+      if (this._upSignalBlockedSince === 0) this._upSignalBlockedSince = tsNow;
+    } else {
+      this._upSignalBlockedSince = 0;
+    }
+    if (dnSignalBlocked) {
+      if (this._dnSignalBlockedSince === 0) this._dnSignalBlockedSince = tsNow;
+    } else {
+      this._dnSignalBlockedSince = 0;
+    }
+
+    // trend 明确方向 (非 flat) 时保留即时撤单; flat 下仅当信号持续 ≥ 5s 才撤
+    const sigFavorsDownSustained = trend === "down"
+      || (signalFavorsDown && tsNow - this._signalFavorsDownSince >= SIGNAL_FLIP_COOLDOWN_MS);
+    const sigFavorsUpSustained = trend === "up"
+      || (signalFavorsUp && tsNow - this._signalFavorsUpSince >= SIGNAL_FLIP_COOLDOWN_MS);
+    const upBlockedSustained = upSignalBlocked && tsNow - this._upSignalBlockedSince >= SIGNAL_FLIP_COOLDOWN_MS;
+    const dnBlockedSustained = dnSignalBlocked && tsNow - this._dnSignalBlockedSince >= SIGNAL_FLIP_COOLDOWN_MS;
+
+    if ((sigFavorsDownSustained || upBlockedSustained) && this.preOrderUpId) {
       await trader.cancelOrder(this.preOrderUpId).catch(() => {});
       this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
-      logger.info(`DUAL SIDE: UP cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${upSignalBlocked ? " BLOCKED" : ""})`);
+      logger.info(`DUAL SIDE: UP cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${upBlockedSustained ? " BLOCKED" : ""})`);
     }
-    if ((signalFavorsUp || dnSignalBlocked) && this.preOrderDownId) {
+    if ((sigFavorsUpSustained || dnBlockedSustained) && this.preOrderDownId) {
       await trader.cancelOrder(this.preOrderDownId).catch(() => {});
       this.preOrderDownId = ""; this.preOrderDownPrice = 0; this.preOrderDownShares = 0;
-      logger.info(`DUAL SIDE: DOWN cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${dnSignalBlocked ? " BLOCKED" : ""})`);
+      logger.info(`DUAL SIDE: DOWN cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${dnBlockedSustained ? " BLOCKED" : ""})`);
     }
 
     // ── Binance 方向过滤: BTC方向明确时撤销逆向侧预挂单 ──

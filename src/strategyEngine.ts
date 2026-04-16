@@ -44,6 +44,7 @@ export interface MispricingCandidate {
   oppTokenKey: "upToken" | "downToken";
   dumpDetected: string;
   dumpVelocity: "fast" | "normal" | "slow"; // 砸盘速度: fast=<800ms, slow=>3000ms
+  trendFollow?: boolean; // 趋势跟随入场(zero-sum repricing 时买上涨侧), 由 bot.ts 放宽 maxAsk
 }
 
 export interface MispricingEvaluation {
@@ -226,6 +227,20 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
       result.momentumRejects.push(
         "UP dump but DN ask rose +" + (downRise*100).toFixed(1) + "% (peak+" + (oppRiseSincePeak*100).toFixed(1) + "%) [" + which + "] - zero-sum repricing"
       );
+      // 趋势跟随: UP 砸盘 + DN 上涨 + BTC 下跌 → DOWN 是赢家, 但 ask 已在上涨, 仍可能有 BSM edge
+      // 条件: BTC 60s 明确下跌(<-0.03%) 且 DN 信号共识支持 + DN ask 在 0.30-0.85 合理区间
+      const btcConfirmsDown = shortMomentum <= -0.0003;
+      if (btcConfirmsDown && downSignalScore >= 1.5 && downAsk >= 0.30 && downAsk <= 0.85) {
+        result.candidates.push({
+          dir: "down",
+          askPrice: downAsk,
+          buyTokenKey: "downToken",
+          oppTokenKey: "upToken",
+          dumpDetected: "TREND-FOLLOW: UP dump -" + (upDrop*100).toFixed(1) + "% + DN rise +" + (downRise*100).toFixed(1) + "% (BTC60=" + (shortMomentum*100).toFixed(3) + "% sig=" + downSignalScore.toFixed(1) + ") → buy DN @" + downAsk.toFixed(2),
+          dumpVelocity: upVelocity,
+          trendFollow: true,
+        });
+      }
     } else {
       result.candidates.push({
         dir: "up",
@@ -267,6 +282,19 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
       result.momentumRejects.push(
         "DN dump but UP ask rose +" + (upRise*100).toFixed(1) + "% (peak+" + (oppRiseSincePeak*100).toFixed(1) + "%) [" + which + "] - zero-sum repricing"
       );
+      // 趋势跟随: DN 砸盘 + UP 上涨 + BTC 上涨 → UP 是赢家, 仍可能有 BSM edge
+      const btcConfirmsUp = shortMomentum >= 0.0003;
+      if (btcConfirmsUp && upSignalScore >= 1.5 && upAsk >= 0.30 && upAsk <= 0.85) {
+        result.candidates.push({
+          dir: "up",
+          askPrice: upAsk,
+          buyTokenKey: "upToken",
+          oppTokenKey: "downToken",
+          dumpDetected: "TREND-FOLLOW: DN dump -" + (downDrop*100).toFixed(1) + "% + UP rise +" + (upRise*100).toFixed(1) + "% (BTC60=+" + (shortMomentum*100).toFixed(3) + "% sig=" + upSignalScore.toFixed(1) + ") → buy UP @" + upAsk.toFixed(2),
+          dumpVelocity: dnVelocity,
+          trendFollow: true,
+        });
+      }
     } else {
       result.candidates.push({
         dir: "down",
