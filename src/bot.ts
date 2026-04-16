@@ -2056,15 +2056,18 @@ export class Hedge15mEngine {
     // 信号共识 >= 2.5 时也视为有方向，即使 bias 仍 flat
     const signalFavorsDown = trend === "down" || (trend === "flat" && dnSignalScore >= 2.5 && upSignalScore < 1.0);
     const signalFavorsUp = trend === "up" || (trend === "flat" && upSignalScore >= 2.5 && dnSignalScore < 1.0);
-    if (signalFavorsDown && this.preOrderUpId) {
+    // 强反向信号阻止新挂单: score <= -2.0 说明该方向信号严重矛盾，不值得挂单承担被错误成交风险
+    const upSignalBlocked = upSignalScore <= -2.0;
+    const dnSignalBlocked = dnSignalScore <= -2.0;
+    if ((signalFavorsDown || upSignalBlocked) && this.preOrderUpId) {
       await trader.cancelOrder(this.preOrderUpId).catch(() => {});
       this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
-      logger.info(`DUAL SIDE: UP cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)})`);
+      logger.info(`DUAL SIDE: UP cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${upSignalBlocked ? " BLOCKED" : ""})`);
     }
-    if (signalFavorsUp && this.preOrderDownId) {
+    if ((signalFavorsUp || dnSignalBlocked) && this.preOrderDownId) {
       await trader.cancelOrder(this.preOrderDownId).catch(() => {});
       this.preOrderDownId = ""; this.preOrderDownPrice = 0; this.preOrderDownShares = 0;
-      logger.info(`DUAL SIDE: DOWN cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)})`);
+      logger.info(`DUAL SIDE: DOWN cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)}${dnSignalBlocked ? " BLOCKED" : ""})`);
     }
 
     // ── Binance 方向过滤: BTC方向明确时撤销逆向侧预挂单 ──
@@ -2145,7 +2148,7 @@ export class Hedge15mEngine {
     const tiltDn = sigTiltDn * btcTiltDn;
 
     // ── UP 侧挂单管理 ──
-    if (!lowLiquidity && !signalFavorsDown && !btcBlocksUp && upInRange && !!upBsEntry?.allowed) {
+    if (!lowLiquidity && !signalFavorsDown && !upSignalBlocked && !btcBlocksUp && upInRange && !!upBsEntry?.allowed) {
       const upPreKellyCap = upLimit <= 0.15 ? 0.40 : upLimit <= 0.20 ? 0.35 : upLimit <= 0.25 ? 0.30 : 0.25;
       const upBudgetPct = Math.min(upPreKellyCap, calcPreBudgetPct(upLimit, upBsEntry.fairKelly) * this.getNetEdgeTier(upBsEntry.effectiveEdge).multiplier);
       const upShares = Math.min(MAX_SHARES, Math.floor((this.balance * upBudgetPct * 0.7 * tiltUp * timeBoost) / upLimit));
@@ -2198,7 +2201,7 @@ export class Hedge15mEngine {
     }
 
     // ── DOWN 侧挂单管理 ──
-    if (!lowLiquidity && !signalFavorsUp && !btcBlocksDn && downInRange && !!downBsEntry?.allowed) {
+    if (!lowLiquidity && !signalFavorsUp && !dnSignalBlocked && !btcBlocksDn && downInRange && !!downBsEntry?.allowed) {
       const dnPreKellyCap = downLimit <= 0.15 ? 0.40 : downLimit <= 0.20 ? 0.35 : downLimit <= 0.25 ? 0.30 : 0.25;
       const dnBudgetPct = Math.min(dnPreKellyCap, calcPreBudgetPct(downLimit, downBsEntry.fairKelly) * this.getNetEdgeTier(downBsEntry.effectiveEdge).multiplier);
       const dnShares = Math.min(MAX_SHARES, Math.floor((this.balance * dnBudgetPct * 0.7 * tiltDn * timeBoost) / downLimit));
@@ -2260,15 +2263,16 @@ export class Hedge15mEngine {
     observedSum = 0,
   ): Promise<void> {
     const bsEntry = this.evaluateBsEntry(dir, fillPrice, this.secondsLeft, "dual-side");
-    // 低价 maker: BSM 短时翻转时仍可能持有; 成交价过高则 BSM 拒单时倾向平仓
-    if (!bsEntry.allowed && fillPrice > DUAL_SIDE_KEEP_ON_BSM_REJECT) {
+    // 动态 KEEP 阈值: 只有成交价 < bsFair (edge>0) 才持有; 否则平仓止损
+    const dynamicKeepThreshold = Math.min(DUAL_SIDE_KEEP_ON_BSM_REJECT, bsEntry.fairRaw);
+    if (!bsEntry.allowed && fillPrice > dynamicKeepThreshold) {
       this.logBsReject("dual-side-fill", dir, fillPrice, bsEntry);
       const unwind = await trader.placeFakSell(leg1Token, filledShares, this.negRisk).catch(() => null);
       if (unwind) {
         this.leg1AttemptedThisRound = true;
         this.activeStrategyMode = "none";
         this.status = `预挂成交后立即平仓: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} x${filledShares.toFixed(0)}`;
-        logger.warn(`DUAL SIDE UNWIND: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} rejected by BSM, sold immediately`);
+        logger.warn(`DUAL SIDE UNWIND: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} rejected by BSM (fair=${bsEntry.fairRaw.toFixed(3)} keepMax=${dynamicKeepThreshold.toFixed(2)}), sold immediately`);
         this.writeRoundAudit("preorder-unwind", {
           dir,
           fillPrice,
@@ -2277,15 +2281,15 @@ export class Hedge15mEngine {
           bsFair: bsEntry.fairRaw,
           effectiveCost: bsEntry.effectiveCost,
           effectiveEdge: bsEntry.effectiveEdge,
+          dynamicKeepThreshold,
           reason: bsEntry.reason,
         });
         return;
       }
       logger.error(`DUAL SIDE UNWIND FAILED: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} — keeping position to settlement`);
     } else if (!bsEntry.allowed) {
-      // 低价成交: BSM reject但不unwind, 持有到结算仍EV+
       logger.info(
-        `DUAL SIDE KEEP: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} BSM rejected (${bsEntry.reason}) but fillPrice ≤ $${DUAL_SIDE_KEEP_ON_BSM_REJECT.toFixed(2)} — holding to settlement (EV+ at low price)`,
+        `DUAL SIDE KEEP: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} BSM rejected (${bsEntry.reason}) but fillPrice ≤ keepMax=$${dynamicKeepThreshold.toFixed(2)} (fair=${bsEntry.fairRaw.toFixed(3)}) — holding (edge>0)`,
       );
     }
 
