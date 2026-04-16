@@ -306,12 +306,9 @@ tr:hover{background:rgba(118,183,255,.03)}
           <span style="color:var(--muted)">仓位 <b id="p-kelly" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">预挂价格上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">反应价格上限 <b id="p-max-ask" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">净edge门槛 <b id="p-edge-rule" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">净edge门槛 <b id="p-edge-rule" style="color:var(--text)">≥8%</b></span>
           <span style="color:var(--muted)">砸盘确认 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">窗口 <b id="p-window" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">Toxic阻断 <b id="p-toxic-block" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">滑点 <b id="p-slippage" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">深度 <b id="p-depth-limit" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">费用 <b style="color:var(--green)">maker 0%</b></span>
         </div>
       </div>
@@ -453,11 +450,10 @@ function renderDirectionalAudit(history) {
     return;
   }
   const inferredTier = h => {
-    if (h.entryEdgeTier) return h.entryEdgeTier;
+    if (h.entryEdgeTier && h.entryEdgeTier !== '--') return h.entryEdgeTier;
     const e = Number(h.entryEffectiveEdge || 0);
     if (e >= 0.25) return 'strong';
     if (e >= 0.15) return 'normal';
-    if (e >= 0.08) return 'small';
     return 'small';
   };
   const byTier = {
@@ -517,12 +513,13 @@ function render(s) {
   pEl.style.color = s.totalProfit>=0?'#42d392':'#ff6b6b';
   document.getElementById('s-balance').textContent = '\$'+s.balance.toFixed(2);
   document.getElementById('s-record').textContent = s.wins+'W/'+s.losses+'L '+s.sessionROI.toFixed(1)+'%';
+  const edgeColor = e => e>=0.25?'#42d392':e>=0.15?'#71e5ff':e>=0.08?'#76b7ff':e>=0?'#f4c96b':'#ff6b6b';
   // 实时净edge: 取UP/DN更优一侧
   const evEl0 = document.getElementById('s-ev');
   const bestEdge = Math.max(Number(s.upNetEdge || -1), Number(s.downNetEdge || -1));
   if (bestEdge > -1) {
     evEl0.textContent = (bestEdge>=0?'+':'') + (bestEdge * 100).toFixed(1) + '%';
-    evEl0.style.color = bestEdge>=0.15?'#42d392':bestEdge>=0.08?'#76b7ff':bestEdge>=0?'#f4c96b':'#ff6b6b';
+    evEl0.style.color = edgeColor(bestEdge);
   } else { evEl0.textContent='--'; evEl0.style.color=''; }
   // 实际EV: 历史平均每份盈利
   const avgEvEl = document.getElementById('s-avg-ev');
@@ -573,17 +570,18 @@ function render(s) {
   const upEvStr = s.upAsk>0?fmtNetEdge(Number(s.upNetEdge||0)):'';
   const dnEvStr = s.downAsk>0?fmtNetEdge(Number(s.downNetEdge||0)):'';
   const upEvEl = document.getElementById('h-up-ev');
-  upEvEl.innerHTML = '\$'+upA+'<span style=\"margin-left:6px;color:'+(Number(s.upNetEdge||0)>=0.15?'#42d392':Number(s.upNetEdge||0)>=0.08?'#76b7ff':Number(s.upNetEdge||0)>=0?'#f4c96b':'#ff6b6b')+'\">'+(upEvStr||'')+'</span>';
+  upEvEl.innerHTML = '\$'+upA+'<span style=\"margin-left:6px;color:'+edgeColor(Number(s.upNetEdge||0))+'\">'+(upEvStr||'')+'</span>';
   const dnEvEl = document.getElementById('h-dn-ev');
-  dnEvEl.innerHTML = '\$'+dnA+'<span style=\"margin-left:6px;color:'+(Number(s.downNetEdge||0)>=0.15?'#42d392':Number(s.downNetEdge||0)>=0.08?'#76b7ff':Number(s.downNetEdge||0)>=0?'#f4c96b':'#ff6b6b')+'\">'+(dnEvStr||'')+'</span>';
+  dnEvEl.innerHTML = '\$'+dnA+'<span style=\"margin-left:6px;color:'+edgeColor(Number(s.downNetEdge||0))+'\">'+(dnEvStr||'')+'</span>';
   const bsFairEl = document.getElementById('h-bs-fair');
   bsFairEl.textContent = (s.upBsFair>0?s.upBsFair.toFixed(3):'--')+' / '+(s.downBsFair>0?s.downBsFair.toFixed(3):'--');
   bsFairEl.style.color = '#76b7ff';
   const netEdgeEl = document.getElementById('h-net-edge');
   netEdgeEl.textContent = ((s.upNetEdge>=0?'+':'')+(s.upNetEdge*100).toFixed(1)+'%')+' / '+((s.downNetEdge>=0?'+':'')+(s.downNetEdge*100).toFixed(1)+'%');
-  netEdgeEl.style.color = bestEdge>=0.15?'#42d392':bestEdge>=0.08?'#76b7ff':'#f4c96b';
+  netEdgeEl.style.color = edgeColor(bestEdge);
   document.getElementById('h-eff-cost').textContent = (s.upEffectiveCost>0?s.upEffectiveCost.toFixed(3):'--')+' / '+(s.downEffectiveCost>0?s.downEffectiveCost.toFixed(3):'--');
-  document.getElementById('h-edge-tier').textContent = (s.upEdgeTier||'--')+' / '+(s.downEdgeTier||'--');
+  const upMul = s.upEdgeMultiplier||0, dnMul = s.downEdgeMultiplier||0;
+  document.getElementById('h-edge-tier').textContent = (s.upEdgeTier||'--')+(upMul?'×'+upMul.toFixed(2):'')+' / '+(s.downEdgeTier||'--')+(dnMul?'×'+dnMul.toFixed(2):'');
   const bsmRejectEl = document.getElementById('h-bsm-reject');
   bsmRejectEl.textContent = s.lastBsmRejectReason || '--';
   bsmRejectEl.style.color = s.lastBsmRejectReason ? '#f4c96b' : '#7a8ea6';
@@ -603,26 +601,28 @@ function render(s) {
   if (s.hedgeLeg1Price > 0) {
     const edge = Number(s.leg1EffectiveEdge || 0);
     evEl.textContent = (edge>=0?'+':'') + (edge * 100).toFixed(1) + '% · ' + (s.leg1EdgeTier || '--');
-    evEl.style.color = edge >= 0.15 ? '#42d392' : edge >= 0.08 ? '#76b7ff' : '#f4c96b';
+    evEl.style.color = edgeColor(edge);
   } else {
     evEl.textContent = '--'; evEl.style.color = '';
   }
   document.getElementById('dump-mom-rej').textContent = s.roundMomentumRejects||0;
   document.getElementById('dump-ask-rej').textContent = s.roundEntryAskRejects||0;
-  // 信号强度: dirAligned / dirContra
+  // 信号强度: dirAlignedScore / dirContraScore (加权浮点)
   const sigEl = document.getElementById('h-signal-strength');
+  const sigNet = (s.dirAlignedScore||0)-(s.dirContraScore||0);
+  const dynEdgeBase = s.trendBias==='flat' ? 9 : 8;
+  const adjEdge = Math.min(12, Math.max(3, dynEdgeBase - sigNet * 0.5));
   if (sigEl) {
-    const al = s.dirAlignedCount||0, co = s.dirContraCount||0;
-    const net = al - co;
-    const label = net >= 3 ? '强一致' : net >= 1 ? '偏一致' : net <= -2 ? '有矛盾' : '中性';
-    sigEl.textContent = '\u2191'+al+' \u2193'+co+' '+label;
-    sigEl.style.color = net >= 3 ? '#42d392' : net >= 1 ? '#76b7ff' : net <= -2 ? '#ff6b6b' : '#7a8ea6';
+    const al = s.dirAlignedScore||0, co = s.dirContraScore||0;
+    const label = sigNet >= 3.5 ? '强一致' : sigNet >= 1.5 ? '偏一致' : sigNet <= -2.5 ? '有矛盾' : '中性';
+    sigEl.textContent = '\u2191'+al.toFixed(1)+' \u2193'+co.toFixed(1)+' '+label;
+    sigEl.style.color = sigNet >= 3.5 ? '#42d392' : sigNet >= 1.5 ? '#76b7ff' : sigNet <= -2.5 ? '#ff6b6b' : '#7a8ea6';
   }
   // 持仓策略: net-edge显示
   const meEl = document.getElementById('h-mid-exit');
   if (s.hedgeState === 'leg1_filled') {
     const edge = Number(s.leg1EffectiveEdge || 0);
-    const srcLabel = '砸盘持有';
+    const srcLabel = s.leg1EntrySource === 'dual-side-preorder' ? '预挂持有' : '砸盘持有';
     meEl.innerHTML = '<span class=\"tag tag-g\">'+srcLabel+' edge '+(edge>=0?'+':'')+(edge*100).toFixed(1)+'% ('+(s.leg1EdgeTier||'--')+')</span>';
   } else {
     meEl.textContent = '--'; meEl.style.color = '';
@@ -634,7 +634,7 @@ function render(s) {
     document.getElementById('h-leg1').textContent='--';
   }
   const xEl = document.getElementById('h-expected');
-  xEl.textContent = '≤$'+s.effectiveMaxAsk.toFixed(2)+' (净edge≥8%)';
+  xEl.textContent = '≤$'+s.effectiveMaxAsk.toFixed(2)+' (净edge≥'+adjEdge.toFixed(1)+'%)';
   xEl.style.color = '#42d392';
   const scEl = document.getElementById('h-sum-confirm');
   if (scEl) {
@@ -702,11 +702,8 @@ function render(s) {
     document.getElementById('p-kelly').textContent = kMap[s.rtKellyFraction] || (s.rtKellyFraction*100).toFixed(0)+'% Kelly';
     document.getElementById('p-dual-ask').textContent = '≤$'+s.rtDualSideMaxAsk.toFixed(2);
     document.getElementById('p-max-ask').textContent = '≤$'+s.rtMaxEntryAsk.toFixed(2);
-    document.getElementById('p-edge-rule').textContent = s.rtNetEdgeMin || '≥8%';
-    document.getElementById('p-toxic-block').textContent = s.rtToxicBlockPbs || '--';
-    document.getElementById('p-slippage').textContent = s.rtSlippagePct || '--';
-    document.getElementById('p-depth-limit').textContent = s.rtDepthLimitPct || '--';
-    document.getElementById('p-dump-confirm').textContent = (s.rtDumpThreshold || '8%') + ' / ' + s.rtDumpConfirmCycles+'cycle';
+    document.getElementById('p-edge-rule').textContent = '≥'+adjEdge.toFixed(1)+'%';
+    document.getElementById('p-dump-confirm').textContent = s.rtDumpConfirmCycles+'cycle';
     document.getElementById('p-window').textContent = s.rtEntryWindowS+'s / min'+s.rtMinEntrySecs+'s';
   }
 
@@ -746,7 +743,7 @@ function render(s) {
       +'<td><span class="tag '+cls+'">'+h.result+'</span>'+est+'</td>'
       +'<td>'+h.leg1Dir+'</td>'
       +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+(h.leg1Shares||0).toFixed(0)+'</small></td>'
-      +'<td style="color:'+(hEdge>=0.15?'#42d392':hEdge>=0.08?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
+      +'<td style="color:'+(hEdge>=0.25?'#42d392':hEdge>=0.15?'#71e5ff':hEdge>=0.08?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
       +'<td>\$'+(h.totalCost||0).toFixed(2)+'</td>'
       +'<td style="color:'+(h.profit>=0?'#42d392':'#ff6b6b')+'"'+bd+'>'+pf+'</td>'
       +'<td style="color:'+(h.cumProfit>=0?'#42d392':'#ff6b6b')+'">\$'+(h.cumProfit||0).toFixed(2)+'</td>'

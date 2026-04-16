@@ -320,6 +320,20 @@ export class Trader {
     this.syncUserSubscriptions(previousIds, nextSet);
   }
 
+  pruneStaleOrderCaches(keepOrderIds?: Set<string>): void {
+    if (!keepOrderIds || keepOrderIds.size === 0) {
+      this.orderFillCache.clear();
+      this.orderUpdateVersions.clear();
+    } else {
+      for (const id of this.orderFillCache.keys()) {
+        if (!keepOrderIds.has(id)) this.orderFillCache.delete(id);
+      }
+      for (const id of this.orderUpdateVersions.keys()) {
+        if (!keepOrderIds.has(id)) this.orderUpdateVersions.delete(id);
+      }
+    }
+  }
+
   stopOrderbookLoop(): void {
     this.orderbookLoopActive = false;
     this.trackedTokens.clear();
@@ -822,6 +836,7 @@ export class Trader {
 
   private async fetchOrderFillDetailsOnce(orderId: string): Promise<{ filled: number; avgPrice: number }> {
     const o: any = await this.client.getOrder(orderId);
+    if (!o) return { filled: 0, avgPrice: 0 };
     const sizeMatched = parseNum(o.size_matched);
     if (sizeMatched <= 0) {
       this.upsertOrderFillCache(orderId, 0, 0, o.status || "OPEN");

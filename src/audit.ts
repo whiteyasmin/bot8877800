@@ -44,9 +44,13 @@ function pct(num: number, den: number): number {
 
 export function loadHistoryEntries(filePath = HISTORY_FILE): HedgeHistoryEntry[] {
   if (!fs.existsSync(filePath)) return [];
-  const raw = fs.readFileSync(filePath, "utf8");
-  const parsed = JSON.parse(raw);
-  return Array.isArray(parsed?.history) ? parsed.history as HedgeHistoryEntry[] : [];
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.history) ? parsed.history as HedgeHistoryEntry[] : [];
+  } catch {
+    return [];
+  }
 }
 
 export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTORY_FILE): AuditReport {

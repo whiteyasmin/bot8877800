@@ -28,17 +28,7 @@ export function planHedgeEntry(input: HedgeEntryPlanInput): EntryPlanResult {
   if (askPrice < minEntryAsk) {
     return { allowed: false, reason: `ask=${askPrice.toFixed(2)} < MIN_ENTRY_ASK=${minEntryAsk}` };
   }
-  // BTC方向逆向过滤: 狙击手+推土机融合
-  // 顺势可以不管，但如果是逆向(BTC跌时买UP=接飞刀)，只允许在价格极便宜(<=0.22)时接盘
-  if (directionalBias === "down" && dir === "up") {
-    if (askPrice > 0.22) {
-      return { allowed: false, reason: `逆势(BTC向下买UP)且价格${askPrice.toFixed(2)}>0.22, 拒绝推土机高频损耗` };
-    }
-  }
-  if (directionalBias === "up" && dir === "down") {
-    if (askPrice > 0.22) {
-      return { allowed: false, reason: `逆势(BTC向上买DOWN)且价格${askPrice.toFixed(2)}>0.22, 拒绝推土机高频损耗` };
-    }
-  }
+  // 逆势判断统一由 buyLeg1 的 isContraTrend gate 处理 (CONTRA_TREND_EXTRA_EDGE + CONTRA_TREND_SCALE)
+  // 高 edge 的逆势入场仍有 EV+，不在此处硬拒
   return { allowed: true };
 }

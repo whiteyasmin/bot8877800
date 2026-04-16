@@ -11,6 +11,8 @@ export interface DumpBaseline {
   downDrop: number;
   upDropMs: number;   // 从峰值到当前经过的毫秒数 (用于计算dump velocity)
   downDropMs: number;
+  downAskAtUpPeak: number;   // UP 侧 peak 时刻的 DOWN ask
+  upAskAtDownPeak: number;   // DOWN 侧 peak 时刻的 UP ask
 }
 
 export class RoundMarketState {
@@ -37,18 +39,31 @@ export class RoundMarketState {
       downAsk: baseSnapshots.reduce((sum, snapshot) => sum + snapshot.downAsk, 0) / baseSnapshots.length,
     };
 
-    // peak基准: 窗口内各侧最高ask (捕捉"从哪里砸下来的")
-    let peakUpAsk = 0;
+    // peak基准: P90 分位数 (消除单点尖刺噪声，样本<5 时回退到绝对最大)
+    const snaps = this.askSnapshots;
+    const sortedUp = snaps.map(s => s.upAsk).sort((a, b) => a - b);
+    const sortedDn = snaps.map(s => s.downAsk).sort((a, b) => a - b);
+    const peakUpAsk = sortedUp.length >= 5
+      ? sortedUp[Math.floor(sortedUp.length * 0.9)]
+      : sortedUp[sortedUp.length - 1];
+    const peakDownAsk = sortedDn.length >= 5
+      ? sortedDn[Math.floor(sortedDn.length * 0.9)]
+      : sortedDn[sortedDn.length - 1];
+
+    // peak 时间戳取该 P90 价位首次出现的时刻；同时记录 peak 时刻对侧价格
     let peakUpTs = now;
-    let peakDownAsk = 0;
+    let downAskAtUpPeak = 0;
+    for (const snap of snaps) {
+      if (snap.upAsk >= peakUpAsk) { peakUpTs = snap.ts; downAskAtUpPeak = snap.downAsk; break; }
+    }
     let peakDownTs = now;
-    for (const snap of this.askSnapshots) {
-      if (snap.upAsk > peakUpAsk) { peakUpAsk = snap.upAsk; peakUpTs = snap.ts; }
-      if (snap.downAsk > peakDownAsk) { peakDownAsk = snap.downAsk; peakDownTs = snap.ts; }
+    let upAskAtDownPeak = 0;
+    for (const snap of snaps) {
+      if (snap.downAsk >= peakDownAsk) { peakDownTs = snap.ts; upAskAtDownPeak = snap.upAsk; break; }
     }
     const peak = { upAsk: peakUpAsk, downAsk: peakDownAsk };
 
-    const latest = this.askSnapshots[this.askSnapshots.length - 1];
+    const latest = snaps[snaps.length - 1];
 
     // 跌幅取 oldest基准 和 peak基准 中更大者
     const upDropOldest = oldest.upAsk > 0.10 ? (oldest.upAsk - latest.upAsk) / oldest.upAsk : 0;
@@ -63,6 +78,6 @@ export class RoundMarketState {
     const upDropMs = Math.max(1, now - peakUpTs);
     const downDropMs = Math.max(1, now - peakDownTs);
 
-    return { oldest, peak, upDrop, downDrop, upDropMs, downDropMs };
+    return { oldest, peak, upDrop, downDrop, upDropMs, downDropMs, downAskAtUpPeak, upAskAtDownPeak };
   }
 }

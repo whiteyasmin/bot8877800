@@ -11,7 +11,6 @@ export interface EntryOrderbookCheckInput {
 export interface EntryOrderbookCheckResult {
   allowed: boolean;
   entryAsk: number;
-  suggestedShares?: number;
   reason?: string;
 }
 
@@ -41,31 +40,25 @@ export function evaluateEntryOrderbook(input: EntryOrderbookCheckInput): EntryOr
     reboundLimit,
   } = input;
 
-  let suggestedShares = shares;
-
   if (liveAsk != null && liveBid != null) {
     const spread = liveAsk - liveBid;
     if (spread > spreadLimit) {
-      return { allowed: false, entryAsk: askPrice, reason: `spread=$${spread.toFixed(2)}\n > $${spreadLimit.toFixed(2)}, too wide` };
+      return { allowed: false, entryAsk: askPrice, reason: `spread=$${spread.toFixed(2)} > $${spreadLimit.toFixed(2)}, too wide` };
     }
-    
-    if (askDepth < shares * 0.3) {
-      return { allowed: false, entryAsk: askPrice, reason: `askDepth=${askDepth.toFixed(0)} < ${(shares * 0.3).toFixed(0)} needed (30%)` };
-    } else if (askDepth < shares) {
-      suggestedShares = Math.max(10, Math.floor(askDepth));
+    if (askDepth < shares * 0.5) {
+      return { allowed: false, entryAsk: askPrice, reason: `askDepth=${askDepth.toFixed(0)} < ${(shares * 0.5).toFixed(0)} needed (50%)` };
     }
-    
-    if (liveAsk > Math.max(askPrice + 0.03, askPrice * reboundLimit)) {
+    if (liveAsk > askPrice * reboundLimit) {
       return {
         allowed: false,
         entryAsk: askPrice,
-        reason: `price rebounded ${askPrice.toFixed(2)} -> ${liveAsk.toFixed(2)} (+${((liveAsk / askPrice - 1) * 100).toFixed(1)}%)`,
+        reason: `price rebounded ${askPrice.toFixed(2)}→${liveAsk.toFixed(2)} (+${((liveAsk / askPrice - 1) * 100).toFixed(1)}%)`,
       };
     }
-    return { allowed: true, entryAsk: liveAsk > 0 ? liveAsk : askPrice, suggestedShares };       
+    return { allowed: true, entryAsk: liveAsk > 0 ? liveAsk : askPrice };
   }
 
-  return { allowed: true, entryAsk: askPrice, suggestedShares };
+  return { allowed: true, entryAsk: askPrice };
 }
 
 export function estimateFilledShares(input: EstimatedFillInput): EstimatedFillResult {
@@ -83,8 +76,11 @@ export function estimateFilledShares(input: EstimatedFillInput): EstimatedFillRe
     return { confirmed: false, shares: 0 };
   }
 
+  const divisor = entryAsk * (1 + takerFee);
+  if (divisor <= 0) return { confirmed: false, shares: 0 };
+
   return {
     confirmed: true,
-    shares: Math.max(minShares, Math.floor(spent / (entryAsk * (1 + takerFee)))),
+    shares: Math.max(minShares, Math.floor(spent / divisor)),
   };
 }

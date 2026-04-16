@@ -163,16 +163,22 @@ app.post("/api/start", auth, async (req, res) => {
     res.status(400).json({ error: "缺少私钥或资金地址" });
     return;
   }
+  const safeNum = (v: unknown): number | undefined => {
+    if (v == null) return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
   try {
     await bot.start({
       mode: tradingMode,
-      paperBalance: Number(paperBalance) > 0 ? Number(paperBalance) : undefined,
+      paperBalance: (safeNum(paperBalance) ?? 0) > 0 ? safeNum(paperBalance) : undefined,
       paperSessionMode: paperSessionMode === "persistent" ? "persistent" : "session",
-      dumpConfirmCycles: dumpConfirmCycles != null ? Number(dumpConfirmCycles) : undefined,
+      dumpConfirmCycles: safeNum(dumpConfirmCycles),
       entryWindowPreset: entryWindowPreset || undefined,
-      maxEntryAsk: maxEntryAsk != null ? Number(maxEntryAsk) : undefined,
-      dualSideMaxAsk: dualSideMaxAsk != null ? Number(dualSideMaxAsk) : undefined,
-      kellyFraction: kellyFraction != null ? Number(kellyFraction) : undefined,
+      maxEntryAsk: safeNum(maxEntryAsk),
+      dualSideMaxAsk: safeNum(dualSideMaxAsk),
+      kellyFraction: safeNum(kellyFraction),
     });
     res.json({
       ok: true,
@@ -181,7 +187,8 @@ app.post("/api/start", auth, async (req, res) => {
       paperSessionMode: bot.getState().paperSessionMode,
     });
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: "启动失败" });
+    logger.error(`/api/start error: ${e.message}`);
   }
 });
 
@@ -333,6 +340,9 @@ setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.send(msg);
   });
 }, 250);
+
+// Periodic session/login cleanup (every 5 min) to prevent slow memory growth
+setInterval(() => { pruneExpiredSessions(); pruneLoginAttempts(); }, 5 * 60_000);
 
 // --- Start ---
 

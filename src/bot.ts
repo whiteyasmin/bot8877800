@@ -34,9 +34,9 @@ const DUMP_LOW_PRICE_CUTOFF = 0.22;     // 低价位分界线
 const ENTRY_WINDOW_S  = 660;      // 开局11分钟内监控砸盘, 窗口关闭=ROUND-660=240s=MIN_ENTRY_SECS
 const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
-const MIN_ENTRY_SECS  = 60;       // 把门槛进一步降低到最后1分钟: 只要盈亏比足够高，且有毒性单速斩机制保护，最后时刻照样接单
-const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
-const MIN_ENTRY_ASK   = 0.05;     // 极限放宽下限: 有了严格止损护航，完全可以承接极端的 $0.05 带血恐慌筹码
+const MIN_ENTRY_SECS  = 120;      // 剩余 <4分钟不开新仓 (放宽: 低价入场EV+即使时间短, 4min足够结算)
+const MAX_ENTRY_ASK   = 0.30;     // Leg1 入场价上限: 降至$0.30, 砍掉$0.31-0.35亏损桶 (paper证明>$0.25净亏)
+const MIN_ENTRY_ASK   = 0.10;     // Leg1 入场价下限, 深度砸盘时低价=高EV (dumpThreshold已过滤噪声)
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
 const MOMENTUM_WINDOW_SEC = 60;            // 短期动量窗口 60秒
 const MOMENTUM_CONTRA_PCT = 0.0010;        // BTC 60s内反方向移动超过 0.10% 才拒绝dump
@@ -48,46 +48,52 @@ const KELLY_WIN_RATE = 0.54;              // Kelly估计胜率 (实盘4W/3L≈57
 const KELLY_FRACTION = 0.5;               // Half-Kelly (避免过度下注)
 const LIMIT_RACE_ENABLED = true;           // 启用 Limit+FAK 赛跑
 const LIMIT_RACE_OFFSET = 0.01;            // limit 挂单价 = ask - offset
-const LIMIT_RACE_FAST_OFFSET = 0.02;       // dump 快速时更激进 (多省1c/份)
-const LIMIT_RACE_TIMEOUT_MS = 600;         // limit 等待上限 ms缩短至 600ms, 防止被反弹甩下车
+const LIMIT_RACE_FAST_OFFSET = 0.03;       // dump 快速时更激进 (多省1c/份)
+const LIMIT_RACE_TIMEOUT_MS = 900;         // limit 等待上限 ms (900ms: maker 0%fee vs taker 2%fee, 多等300ms值得)
 const LIMIT_RACE_POLL_MS = 50;             // 每 50ms 检查一次
 const LIMIT_RACE_FAST_DUMP_THRESHOLD = 0.15; // dump>=15% 视为快速dump
 const DUAL_SIDE_ENABLED = true;            // 启用双侧预挂单做市
-const DUAL_SIDE_SUM_CEILING = 0.98;        // 预挂单目标: 双侧sum ≤ 此值 (放宽0.01增加挂单成交率)
+const DUAL_SIDE_SUM_CEILING = 0.96;        // 预挂单目标: 略收紧至0.96, 提高成交侧+对手ask隐含套利质量 (0.97时边际单偏多)
+/** 本轮 BTC 从开盘价位移 ≥ 此比例时: 撤销逆势预挂单 / 禁止挂逆势单 (原0.25%过宽, flat轮次易接到逆势边) */
+const DUAL_SIDE_BTC_MOVE_BLOCK = 0.0018;
+/** 预挂 maker 成交后若 BSM 拒绝: 仅当成交价 ≤ 此值才持有到期; 高于则 taker 平仓, 避免薄 edge 赌方向 */
+const DUAL_SIDE_KEEP_ON_BSM_REJECT = 0.27;
 const DUAL_SIDE_OFFSET = 0.02;             // 挂单价 = currentAsk - offset (最少, 实际用动态offset)
 const DUAL_SIDE_REFRESH_MS = 2000;         // 每2秒刷新挂单价格 (3s在快行情中偏移过大)
 const DUAL_SIDE_BUDGET_PCT = 0.25;         // 预挂单仓位 (单侧) - 方向性策略EV+加大仓位
-const DUAL_SIDE_MIN_SECS = 60;            // 把预挂单继续延迟到最后1分钟 (有BSM立即平仓护航)
-const DUAL_SIDE_MIN_ASK = 0.05;            // 探底极端行情，迎接 $0.05 的大甩卖
-const DUAL_SIDE_MAX_ASK = 0.35;            // 挂单价上限 (≤0.35保证EV+$0.15/share@50%胜率)
+const DUAL_SIDE_MIN_SECS = 300;            // 剩余≥5min才预挂 (原540太保守, 低价maker成交即使剩5min仍EV+)
+const DUAL_SIDE_MIN_ASK = 0.18;            // 挂单价下限 (与反应入场MIN_ENTRY_ASK对齐)
+const DUAL_SIDE_MAX_ASK = 0.30;            // 预挂上限同步降至$0.30, 与MAX_ENTRY_ASK一致
 
 const DUAL_SIDE_MIN_DRIFT = 0.04;          // 价格偏移>此值才重挂 (降低更新频率)
-const DUAL_SIDE_MIN_VOL = 0.0006;          // 5分钟BTC波动率下限 (0.06%), 去除微波行情
-const REACTIVE_MIN_VOL = 0.0005;           // reactive路径波动率门槛: 低于0.05%视为噪声, 适度放宽以防过滤死寂后的变盘
+const DUAL_SIDE_MIN_VOL = 0.0012;          // 5分钟BTC波动率下限 (0.12%), 低于此视为微行情不挂单
+const REACTIVE_MIN_VOL = 0.0008;           // reactive波动率门槛: 0.08% (原0.10%拒了大量log中7-9%edge的入场)
 const DUMP_LOG_THROTTLE_MS = 2000;         // 重复dump日志节流: 同key至少间隔2s
 
 const LIQUIDITY_FILTER_SUM = 1.10;          // UP+DOWN best ask之和>此值 说明spread太大无edge, 不挂预挂单
-const SUM_DIVERGENCE_MAX = 1.10;            // 入场时 upAsk+downAsk > 此值 → 拒绝入场 (sum≥1.03=市场公平定价, 无dump错定价edge)
-const SUM_DIVERGENCE_RELAXED = 1.12;        // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
+const SUM_DIVERGENCE_MAX = 1.03;            // 入场时 upAsk+downAsk > 此值 → 拒绝入场 (sum≥1.03=市场公平定价, 无dump错定价edge)
+const SUM_DIVERGENCE_RELAXED = 1.05;        // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
 const SUM_DIVERGENCE_MIN = 0.85;            // 入场时 upAsk+downAsk < 此值 → 方向性强、砸盘更可信
 const DUMP_CONFIRM_CYCLES = 1;              // 连续 N 个循环看到 dump 才触发入场 (1: dumpThreshold已过滤噪声, 无需多次确认)
 const MIN_ENTRY_ELAPSED = 30;               // 回合开始至少30s后才允许反应式入场 (30s数据已足够稳定)
-const TREND_BUDGET_BOOST = 0.03;            // 趋势一致在Kelly基础上再加3%
-const TREND_BUDGET_CUT = 0.02;              // 方向中性时在Kelly基础上减2%
-const MIN_NET_EDGE = 0.05;                  // net edge <8% 不做
-const NON_FLAT_MIN_NET_EDGE = 0.06;         // 非flat也提高到6%, 过滤边际噪声单
-const FLAT_MIN_NET_EDGE = 0.08;             // flat行情抬高到8%, 降低噪声入场
-const REACTIVE_MIN_ALIGNMENT_SCORE = 1;     // 盘口信号质量门槛: aligned-contra >= 1
-const REACTIVE_ALIGNMENT_EDGE_OVERRIDE = 0.12; // edge≥12%时允许越过信号门槛
-const MID_NET_EDGE = 0.10;                  // 8%~15% 小仓
-const HIGH_NET_EDGE = 0.18;                 // 15%~25% 正常仓, >25% 强信号仓
+const TREND_BUDGET_BOOST = 0.05;            // 趋势一致在Kelly基础上再加5%
+const TREND_BUDGET_CUT = 0.03;              // 方向中性时在Kelly基础上减3%
+const CONTRA_TREND_SCALE = 0.70;            // 逆势缩仓30%
+const CONTRA_TREND_EXTRA_EDGE = 0.05;       // 逆势需额外5% net edge才允许入场
+const MIN_NET_EDGE = 0.05;                  // BSM net edge 基准门槛: <5% 不做 (secsLeft动态±3%)
+const NON_FLAT_MIN_NET_EDGE = 0.08;         // 非flat行情 regime 门槛: 8%
+const FLAT_MIN_NET_EDGE = 0.09;             // flat行情 regime 门槛: 9%
+const REACTIVE_MIN_ALIGNMENT_SCORE = 1.5;   // 加权信号质量门槛: aligned-contra >= 1.5 (原等权=1)
+const REACTIVE_ALIGNMENT_EDGE_OVERRIDE = 0.20; // edge≥20%时允许越过信号门槛
+const MID_NET_EDGE = 0.15;                  // 8%~15% 小仓
+const HIGH_NET_EDGE = 0.25;                 // 15%~25% 正常仓, >25% 强信号仓
 const BALANCE_ESTIMATE_MIN_PCT = 0.70;
 const BALANCE_ESTIMATE_MAX_PCT = 1.15;
 
 // ── 资金安全守护 ──
 const MIN_BALANCE_TO_TRADE = 5;             // 余额<$5停止交易 (不够开最小仓)
-const MAX_SESSION_LOSS_PCT = 0.35;          // 单次会话亏损超过初始资金35%→暂停交易
-const CONSECUTIVE_LOSS_PAUSE = 9;           // 因为引入了良性微亏止损(Unwind)，连亏阈值放宽到9次，防止正常风控被当成市场失效惩罚
+const MAX_SESSION_LOSS_PCT = 0.35;          // 单次会话亏损超过初始资金35%→暂停交易 (更早止损保留本金)
+const CONSECUTIVE_LOSS_PAUSE = 3;           // 连续亏损≥3次 → 日志提示 + Kelly自动缩仓(0.90^n)
 
 export type PaperSessionMode = "session" | "persistent";
 
@@ -128,8 +134,8 @@ export interface Hedge15mState {
   effectiveMaxAsk: number;
   askSum: number;
   dumpConfirmCount: number;
-  dirAlignedCount: number;
-  dirContraCount: number;
+  dirAlignedScore: number;
+  dirContraScore: number;
   roundMomentumRejects: number;
   roundEntryAskRejects: number;
   preOrderUpPrice: number;
@@ -148,6 +154,9 @@ export interface Hedge15mState {
   downNetEdge: number;
   upEdgeTier: string;
   downEdgeTier: string;
+  upEdgeMultiplier: number;
+  downEdgeMultiplier: number;
+  leg1EntrySource: string;
   lastBsmRejectReason: string;
   // L: Taker Flow
   takerFlowRatio: number;
@@ -185,11 +194,6 @@ export interface Hedge15mState {
   rtMaxEntryAsk: number;
   rtDualSideMaxAsk: number;
   rtKellyFraction: number;
-  rtDumpThreshold?: string;
-  rtNetEdgeMin?: string;
-  rtToxicBlockPbs?: string;
-  rtSlippagePct?: string;
-  rtDepthLimitPct?: string;
   latencyP50: number;
   latencyP90: number;
   latencyNetworkSource: string;
@@ -404,8 +408,9 @@ export class Hedge15mEngine {
   private lastBsmRejectReason = "";
   private _volGateLoggedThisRound = false;  // 去重: 波动率门控日志每轮只打一次
   private _earlyEntryLoggedThisRound = false; // 去重: EARLY日志每轮只打一次
-  private dirAlignedCount = 0;              // 入场时方向一致信号数 (7源)
-  private dirContraCount = 0;               // 入场时方向反向信号数 (7源)
+  private _holdReversalLogged = false;       // 去重: 持仓反转警告每轮只打一次
+  private dirAlignedScore = 0;              // 入场时方向一致信号加权分 (8源)
+  private dirContraScore = 0;               // 入场时方向反向信号加权分 (8源)
   private consecutiveLosses = 0;            // 连续亏损计数 (资金安全守护)
   private leg1FailedAttempts = 0;           // 本回合FAK失败次数 (限制重试)
   private emaVolAnnual = 0;                 // EMA平滑的年化波动率 (BSM用)
@@ -500,6 +505,7 @@ export class Hedge15mEngine {
   }
 
   private getRoundDirectionalBias(): "up" | "down" | "flat" {
+    const score = this.dirAlignedScore - this.dirContraScore;
     return getDirectionalBiasSignal({
       roundStartPrice: this.roundStartBtcPrice,
       btcNow: getBtcPrice(),
@@ -508,6 +514,8 @@ export class Hedge15mEngine {
       directionalMovePct: DIRECTIONAL_MOVE_PCT,
       momentumContraPct: MOMENTUM_CONTRA_PCT,
       trendContraPct: TREND_CONTRA_PCT,
+      secsLeft: this.secondsLeft,
+      signalScore: score,
     });
   }
 
@@ -516,9 +524,11 @@ export class Hedge15mEngine {
   }
 
   /**
-   * 统计7大信号源与入场方向的一致/矛盾数.
-   * 每个信号的 direction 字段为 "buy"/"sell"/"neutral".
-   * buy 等同 "up", sell 等同 "down".
+   * 加权 8 源信号对齐度评分.
+   * 权重按信号对 15 分钟短周期的预测价值分配:
+   *   Taker Flow 1.5 | Depth 1.5 | Large Orders 1.2 | Vol Spike 1.0
+   *   Liquidation 1.0 | BTC 180s Mom 1.0 | Funding Rate 0.8 | Flow Trend 0.5
+   * Funding Rate extreme(>=0.01) 权重 ×2; 方向取反转逻辑(long_pay→看跌).
    */
   private computeSignalAlignment(dir: string): void {
     const targetDir = dir === "up" ? "buy" : "sell";
@@ -526,49 +536,58 @@ export class Hedge15mEngine {
     let aligned = 0;
     let contra = 0;
 
-    // 1. Taker Flow
+    // 1. Taker Flow (w=1.5)
     const flow = getTakerFlowRatio();
-    if (flow.direction === targetDir) aligned++;
-    else if (flow.direction === contraDir) contra++;
+    if (flow.direction === targetDir) aligned += 1.5;
+    else if (flow.direction === contraDir) contra += 1.5;
 
-    // 2. Volume Spike
+    // 2. Volume Spike (w=1.0)
     const vol = getVolumeSpikeInfo();
     if (vol.isSpike) {
-      if (vol.direction === targetDir) aligned++;
-      else if (vol.direction === contraDir) contra++;
+      if (vol.direction === targetDir) aligned += 1.0;
+      else if (vol.direction === contraDir) contra += 1.0;
     }
 
-    // 3. Large Orders
+    // 3. Large Orders (w=1.2)
     const large = getLargeOrderInfo();
-    if (large.direction === targetDir) aligned++;
-    else if (large.direction === contraDir) contra++;
+    if (large.direction === targetDir) aligned += 1.2;
+    else if (large.direction === contraDir) contra += 1.2;
 
-    // 4. Depth Imbalance
+    // 4. Depth Imbalance (w=1.5)
     const depth = getDepthImbalance();
     if (depth.fresh) {
-      if (depth.direction === targetDir) aligned++;
-      else if (depth.direction === contraDir) contra++;
+      if (depth.direction === targetDir) aligned += 1.5;
+      else if (depth.direction === contraDir) contra += 1.5;
     }
 
-    // 5. Liquidation
+    // 5. Liquidation (w=1.0)
     const liq = getLiquidationInfo();
     if (liq.intensity !== "low") {
-      if (liq.direction === targetDir) aligned++;
-      else if (liq.direction === contraDir) contra++;
+      if (liq.direction === targetDir) aligned += 1.0;
+      else if (liq.direction === contraDir) contra += 1.0;
     }
 
-    // 6. Taker Flow Trend (strengthening=主导方加强)
+    // 6. Taker Flow Trend (w=0.5, 与 #1 高度相关故降权)
     const flowTrend = getTakerFlowTrend();
-    if (flowTrend === "strengthening" && flow.direction === targetDir) aligned++;
-    else if (flowTrend === "strengthening" && flow.direction === contraDir) contra++;
+    if (flowTrend === "strengthening" && flow.direction === targetDir) aligned += 0.5;
+    else if (flowTrend === "strengthening" && flow.direction === contraDir) contra += 0.5;
 
-    // 7. BTC 180s Momentum
+    // 7. BTC 180s Momentum (w=1.0)
     const mom180 = getRecentMomentum(180);
-    if ((dir === "up" && mom180 > 0.001) || (dir === "down" && mom180 < -0.001)) aligned++;
-    else if ((dir === "up" && mom180 < -0.001) || (dir === "down" && mom180 > 0.001)) contra++;
+    if ((dir === "up" && mom180 > 0.001) || (dir === "down" && mom180 < -0.001)) aligned += 1.0;
+    else if ((dir === "up" && mom180 < -0.001) || (dir === "down" && mom180 > 0.001)) contra += 1.0;
 
-    this.dirAlignedCount = aligned;
-    this.dirContraCount = contra;
+    // 8. Funding Rate (w=0.8, extreme ×2; 反转逻辑: long_pay=看涨过热→利空, short_pay→利多)
+    const funding = getFundingRateInfo();
+    const fundingW = funding.extreme ? 1.6 : 0.8;
+    if (funding.direction === "long_pay") {
+      if (dir === "down") aligned += fundingW; else if (dir === "up") contra += fundingW;
+    } else if (funding.direction === "short_pay") {
+      if (dir === "up") aligned += fundingW; else if (dir === "down") contra += fundingW;
+    }
+
+    this.dirAlignedScore = aligned;
+    this.dirContraScore = contra;
   }
 
   private getRolling4hPnL(): number {
@@ -675,24 +694,38 @@ export class Hedge15mEngine {
     if (effectiveEdge < dynamicMinEdge) {
       return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
     }
-    // Doji检测: BTC偏<0.01%≈$10 才是真doji
-    const dojiEdge = secsLeft < 300 ? 0.05 : 0.10;
-    if (lnMoneyness < 0.0001 && effectiveEdge < dojiEdge) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `doji-net-edge<${(dojiEdge*100).toFixed(0)}%` };
+    // Doji检测: 用 |ln(S/K)| (BTC偏离幅度) 而非 |d| (σ√T归一化后的值)
+    // 15分钟期权σ√T≈0.003, BTC偏$15→|d|=0.06但|ln(S/K)|=0.00015
+    // 旧阈值|d|<0.05误杀: BTC偏$10就触发doji (砸盘场景BTC可能确实没大动)
+    // 新阈值: |ln(S/K)|<0.0001 (BTC偏<0.01%≈$10) 才是真doji
+    if (lnMoneyness < 0.0001 && effectiveEdge < 0.18) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "doji-net-edge<18%" };
     }
     // near-doji: BTC偏<0.03% (≈$30) — 方向不明确, 要求更高edge
-    const nearDojiEdge = secsLeft < 300 ? 0.03 : 0.06;
-    if (lnMoneyness < 0.0003 && effectiveEdge < nearDojiEdge) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `near-doji-net-edge<${(nearDojiEdge*100).toFixed(0)}%` };
+    if (lnMoneyness < 0.0003 && effectiveEdge < 0.12) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "near-doji-net-edge<12%" };
     }
 
     return { allowed: true, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "ok" };
   }
 
   private getNetEdgeTier(edge: number): { label: "small" | "normal" | "strong"; multiplier: number } {
-    if (edge < MID_NET_EDGE) return { label: "small", multiplier: 0.70 };
-    if (edge < HIGH_NET_EDGE) return { label: "normal", multiplier: 1.00 };
-    return { label: "strong", multiplier: 1.15 };
+    let multiplier: number;
+    let label: "small" | "normal" | "strong";
+    if (edge < MID_NET_EDGE) {
+      label = "small";
+      const t = Math.max(0, (edge - MIN_NET_EDGE)) / (MID_NET_EDGE - MIN_NET_EDGE);
+      multiplier = 0.55 + t * 0.45;
+    } else if (edge < HIGH_NET_EDGE) {
+      label = "normal";
+      const t = (edge - MID_NET_EDGE) / (HIGH_NET_EDGE - MID_NET_EDGE);
+      multiplier = 1.00 + t * 0.22;
+    } else {
+      label = "strong";
+      const t = Math.min(1, (edge - HIGH_NET_EDGE) / 0.15);
+      multiplier = 1.22 + t * 0.18;
+    }
+    return { label, multiplier };
   }
 
   private logBsReject(
@@ -719,24 +752,12 @@ export class Hedge15mEngine {
   }
 
   private getMaxEntryAsk(): number {
-    // 如果剩余时间少于 5 分钟 (300秒) 并且波动大，可以适当允许更高的成本上限至 0.40
-    // 前提是对盈亏比更有把握时
-    let baseMax = this.getEffectiveMaxAsk();
-    return this.secondsLeft < 300 ? Math.min(0.40, baseMax + 0.05) : baseMax;
+    return this.getEffectiveMaxAsk();
   }
 
   /** 方向信号不提升入场上限: 低价才是真正的edge */
-  private getDynamicMaxEntryAsk(entryDir?: string): number {
-    const baseMax = this.getMaxEntryAsk(); // <= 0.35
-    if (!entryDir) return 0.28;
-    
-    const bias = this.getRoundDirectionalBias();
-    
-    // 狙击手+推土机融合: 顺势才允许高价 (0.35)，逆势/震荡压低到0.26
-    if (bias === entryDir) {
-      return baseMax;
-    }
-    return 0.26;
+  private getDynamicMaxEntryAsk(_entryDir?: string): number {
+    return this.getMaxEntryAsk();
   }
 
   private getRoundPhase(): string {
@@ -778,8 +799,8 @@ export class Hedge15mEngine {
     const entryWindowLeft = Math.max(0, secondsLeft - this.rtMinEntrySecs);
     const upBs = this.upAsk > 0 ? this.evaluateBsEntry("up", this.upAsk, secondsLeft, "reactive", true) : null;
     const downBs = this.downAsk > 0 ? this.evaluateBsEntry("down", this.downAsk, secondsLeft, "reactive", true) : null;
-    const upTier = upBs ? this.getNetEdgeTier(upBs.effectiveEdge).label : "--";
-    const downTier = downBs ? this.getNetEdgeTier(downBs.effectiveEdge).label : "--";
+    const upTierObj = upBs ? this.getNetEdgeTier(upBs.effectiveEdge) : null;
+    const downTierObj = downBs ? this.getNetEdgeTier(downBs.effectiveEdge) : null;
     return {
       botRunning: this.running,
       tradingMode: this.tradingMode,
@@ -818,8 +839,8 @@ export class Hedge15mEngine {
       askSum: this.upAsk > 0 && this.downAsk > 0 ? this.upAsk + this.downAsk : 0,
       btcVolatility5m: getRecentVolatility(300),
       dumpConfirmCount: this.dumpConfirmCount,
-      dirAlignedCount: this.dirAlignedCount,
-      dirContraCount: this.dirContraCount,
+      dirAlignedScore: this.dirAlignedScore,
+      dirContraScore: this.dirContraScore,
       roundMomentumRejects: this.roundMomentumRejects,
       roundEntryAskRejects: this.roundEntryAskRejects,
       preOrderUpPrice: this.preOrderUpPrice,
@@ -836,8 +857,11 @@ export class Hedge15mEngine {
       downEffectiveCost: downBs?.effectiveCost ?? 0,
       upNetEdge: upBs?.effectiveEdge ?? 0,
       downNetEdge: downBs?.effectiveEdge ?? 0,
-      upEdgeTier: upTier,
-      downEdgeTier: downTier,
+      upEdgeTier: upTierObj?.label ?? "--",
+      downEdgeTier: downTierObj?.label ?? "--",
+      upEdgeMultiplier: upTierObj?.multiplier ?? 0,
+      downEdgeMultiplier: downTierObj?.multiplier ?? 0,
+      leg1EntrySource: this.leg1EntrySource,
       lastBsmRejectReason: this.lastBsmRejectReason,
       // L: Taker Flow
       ...(() => { const tf = getTakerFlowRatio(); return {
@@ -888,11 +912,6 @@ export class Hedge15mEngine {
       rtMaxEntryAsk: this.rtMaxEntryAsk,
       rtDualSideMaxAsk: this.rtDualSideMaxAsk,
       rtKellyFraction: this.rtKellyFraction,
-      rtDumpThreshold: this.secondsLeft < 300 ? "4%" : "8-12%",
-      rtNetEdgeMin: this.currentTrendBias === "flat" ? "8%" : "6%",
-      rtToxicBlockPbs: ">0.25% (3s)",
-      rtSlippagePct: this.secondsLeft < 30 ? "50ps" : "0.5c",
-      rtDepthLimitPct: this.secondsLeft < 60 ? "2.5%" : "30%",
       latencyP50: dp.p50,
       latencyP90: dp.p90,
       latencyNetworkSource: latency.networkSource,
@@ -1203,8 +1222,9 @@ export class Hedge15mEngine {
     this.lastDumpInfoTs = 0;
     this._volGateLoggedThisRound = false;
     this._earlyEntryLoggedThisRound = false;
-    this.dirAlignedCount = 0;
-    this.dirContraCount = 0;
+    this._holdReversalLogged = false;
+    this.dirAlignedScore = 0;
+    this.dirContraScore = 0;
     this.preOrderUpId = "";
     this.preOrderDownId = "";
     this.preOrderUpPrice = 0;
@@ -1217,8 +1237,16 @@ export class Hedge15mEngine {
     this.leg1EntryInFlight = false;
     this.leg1AttemptedThisRound = false;
     this.leg1FailedAttempts = 0;
-    this.emaVolAnnual = 0; // 每轮重置, 避免上轮极端波动率污染
-    this.emaVolWarmup = 0;
+    this.trader?.pruneStaleOrderCaches();
+    // 跨轮次 EMA 衰减继承: 保留上轮 30% 作为种子, 减少新轮前 3 次采样的噪声尖刺
+    // 极端波动率(>1.2 或 <0.25)时完全重置, 防止异常值跨轮传播
+    if (this.emaVolAnnual > 0.25 && this.emaVolAnnual < 1.20) {
+      this.emaVolAnnual = this.emaVolAnnual * 0.30;
+      this.emaVolWarmup = 1;
+    } else {
+      this.emaVolAnnual = 0;
+      this.emaVolWarmup = 0;
+    }
     this.resetRoundRejectStats();
   }
 
@@ -1284,9 +1312,8 @@ export class Hedge15mEngine {
             logger.warn(`CAPITAL GUARD: session loss $${this.sessionProfit.toFixed(2)} exceeds ${(MAX_SESSION_LOSS_PCT * 100).toFixed(0)}% of bankroll $${this.initialBankroll.toFixed(2)}, skipping`);
             this.writeRoundAudit("round-skip-capital", { reason: "session-loss-limit", sessionProfit: this.sessionProfit, initialBankroll: this.initialBankroll });
           } else if (this.consecutiveLosses >= CONSECUTIVE_LOSS_PAUSE) {
-            // 连亏≥5: 不再完全跳过, 而是以最低仓位(×0.4)继续交易 — JSONL数据证明低价入场长期EV+
-            const cLossScale = Math.max(0.4, Math.pow(0.85, this.consecutiveLosses));
-            logger.warn(`CAPITAL GUARD: ${this.consecutiveLosses} consecutive losses, Kelly scaled to ${(cLossScale*100).toFixed(0)}% (continuing with reduced size)`);
+            const cLossScale = Math.max(0.5, Math.pow(0.90, this.consecutiveLosses));
+            logger.warn(`CAPITAL GUARD: ${this.consecutiveLosses} consecutive losses, Kelly ×${(cLossScale*100).toFixed(0)}% (0.90^n, floor 50%)`);
           }
           // 跳过剩余时间不足的回合 — 无法完成 dump检测 + 对冲
           else if (secs < this.rtMinEntrySecs) {
@@ -1323,18 +1350,6 @@ export class Hedge15mEngine {
 
         const elapsed = ROUND_DURATION - secs;
 
-        // ── 1. 挂单防毒保护 (Toxic Flow Circuit Breaker) ──
-        const shortVolume3s = Math.abs(getRecentMomentum(3));
-          if (shortVolume3s > 0.0025) { // 3秒剧烈波动 > 0.25% (+)
-          if (this.preOrderUpId || this.preOrderDownId) {
-            logger.warn(`【防毒断路器触发】3秒内BTC剧烈波动 ${(shortVolume3s*100).toFixed(3)}% > 0.25%，紧急撤回所有预挂单防御！`);
-            await this.cancelDualSideOrders(trader);
-          }
-          // 哪怕只做反应式入场，也要避开暴涨暴跌的毒流前3秒，让高频玩家先踩雷
-          await sleep(Math.max(500, LIMIT_RACE_POLL_MS));
-          continue; 
-        }
-
         // ═══ State Machine ═══
 
         if (this.hedgeState === "watching") {
@@ -1353,13 +1368,20 @@ export class Hedge15mEngine {
             const dumpBaseline = this.marketState.getDumpBaseline(dumpBaselineMs);
             if (dumpBaseline) {
               const shortMomentum = getRecentMomentum(MOMENTUM_WINDOW_SEC);
+              const shortMomentum30s = getRecentMomentum(30);
               const trendMomentum = getRecentMomentum(TREND_WINDOW_SEC);
               const directionalBias = this.getRoundDirectionalBias();
               this.currentTrendBias = directionalBias;
 
               // 低价位动态降低dump阈值: ask已经便宜时不需等大跌幅
               const lowestAsk = Math.min(this.upAsk, this.downAsk);
-              let effectiveDumpThreshold = lowestAsk <= DUMP_LOW_PRICE_CUTOFF ? DUMP_THRESHOLD_LOW_PRICE : DUMP_THRESHOLD;                if (secs < 300) effectiveDumpThreshold = 0.04;
+              const effectiveDumpThreshold = lowestAsk <= DUMP_LOW_PRICE_CUTOFF ? DUMP_THRESHOLD_LOW_PRICE : DUMP_THRESHOLD;
+
+              // Binance 信号交叉验证: 分别计算两侧的加权信号分
+              this.computeSignalAlignment("up");
+              const dumpUpSigScore = this.dirAlignedScore - this.dirContraScore;
+              this.computeSignalAlignment("down");
+              const dumpDnSigScore = this.dirAlignedScore - this.dirContraScore;
 
               const mispricing = evaluateMispricingOpportunity({
                 upAsk: this.upAsk,
@@ -1378,20 +1400,44 @@ export class Hedge15mEngine {
                 trendContraPct: TREND_CONTRA_PCT,
                 momentumWindowSec: MOMENTUM_WINDOW_SEC,
                 trendWindowSec: TREND_WINDOW_SEC,
+                shortMomentum30s,
+                downAskAtUpPeak: dumpBaseline.downAskAtUpPeak,
+                upAskAtDownPeak: dumpBaseline.upAskAtDownPeak,
+                upSignalScore: dumpUpSigScore,
+                downSignalScore: dumpDnSigScore,
               });
 
               if (mispricing.bothSidesDumping) {
-                // 双侧都在dump: 现在candidates已经过过滤(momentum/dumpRatio/对侧)
-                // 从过滤后的candidates中选BTC方向一致的; 无候选则跳过
+                // 双侧都在dump: 融合 BSM edge 选最优方向
                 const btcDir = getBtcDirection();
                 const btcAlignedDir: "up" | "down" = btcDir === "up" ? "up" : "down";
-                // 优先BTC方向一致的候选, 其次跌幅最大的(已按跌幅排序)
-                const aligned = mispricing.candidates.find(c => c.dir === btcAlignedDir);
-                const bestCandidate = aligned || mispricing.candidates[0];
+                const candidatesWithEdge = mispricing.candidates.map(c => {
+                  const bs = this.evaluateBsEntry(c.dir, c.askPrice, rnd.secondsLeft, "reactive", true);
+                  return { ...c, bsAllowed: bs.allowed, bsEdge: bs.effectiveEdge };
+                });
+                const bsmPassed = candidatesWithEdge.filter(c => c.bsAllowed);
+                let bestCandidate: typeof candidatesWithEdge[0] | undefined;
+                if (bsmPassed.length >= 2) {
+                  // 两侧都通过: edge 差距 < 2% 时用 btcDir 做 tiebreaker，否则选高 edge
+                  const sorted = [...bsmPassed].sort((a, b) => b.bsEdge - a.bsEdge);
+                  const edgeGap = sorted[0].bsEdge - sorted[1].bsEdge;
+                  if (edgeGap < 0.02) {
+                    bestCandidate = sorted.find(c => c.dir === btcAlignedDir) || sorted[0];
+                  } else {
+                    bestCandidate = sorted[0];
+                  }
+                } else if (bsmPassed.length === 1) {
+                  bestCandidate = bsmPassed[0];
+                } else {
+                  // 都不通过 BSM: 回退到 btcDir 对齐 + 跌幅排序
+                  const aligned = candidatesWithEdge.find(c => c.dir === btcAlignedDir);
+                  bestCandidate = aligned || candidatesWithEdge[0];
+                }
                 if (bestCandidate) {
                   const maxAsk = this.getMaxEntryAsk();
                   if (bestCandidate.askPrice > 0 && bestCandidate.askPrice <= maxAsk && bestCandidate.askPrice >= MIN_ENTRY_ASK) {
-                    logger.info(`HEDGE15M BOTH DUMP → picking ${bestCandidate.dir.toUpperCase()} @${bestCandidate.askPrice.toFixed(2)} (BTC=${btcDir}${aligned ? " aligned" : " best-drop"}) (UP -${(dumpBaseline.upDrop*100).toFixed(1)}%, DN -${(dumpBaseline.downDrop*100).toFixed(1)}%)`);
+                    const pickReason = bsmPassed.length >= 2 ? `edge=${(bestCandidate.bsEdge * 100).toFixed(1)}%` : bsmPassed.length === 1 ? "bsm-only" : `BTC=${btcDir} fallback`;
+                    logger.info(`HEDGE15M BOTH DUMP → picking ${bestCandidate.dir.toUpperCase()} @${bestCandidate.askPrice.toFixed(2)} (${pickReason}) (UP -${(dumpBaseline.upDrop*100).toFixed(1)}%, DN -${(dumpBaseline.downDrop*100).toFixed(1)}%)`);
                     this.dumpDetected = `BOTH-DUMP → ${bestCandidate.dir.toUpperCase()} @${bestCandidate.askPrice.toFixed(2)}`;
                     this.currentDumpDrop = bestCandidate.dir === "up" ? dumpBaseline.upDrop : dumpBaseline.downDrop;
                     this.currentDumpVelocity = bestCandidate.dumpVelocity;
@@ -1434,9 +1480,8 @@ export class Hedge15mEngine {
 
                 const candidate = mispricing.candidates[0];
                 if (candidate) {
-                  // ── 早期价格过滤: ask低于MIN_ENTRY_ASK时不尝试入场 (避免无用循环) ──
-                  // 稍微放宽末期的下限，允许低价高胜率单: 10分钟后(>600秒)限制为0.15，末期不再锁死0.20
-                  const dynamicMinAsk = elapsed > 600 ? 0.15 : MIN_ENTRY_ASK;
+                  // ── 动态价格下限: 早期数据不稳用较高 floor，末期放宽抓 EV+ ──
+                  const dynamicMinAsk = elapsed < 180 ? 0.18 : elapsed < 480 ? 0.12 : MIN_ENTRY_ASK;
                   if (candidate.askPrice < dynamicMinAsk) {
                     const skipKey = `minask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
@@ -1445,11 +1490,11 @@ export class Hedge15mEngine {
                     }
                   }
                   // ── 早期价格过滤: ask高于MAX_ENTRY_ASK时不尝试 ──
-                  else if (candidate.askPrice > this.getDynamicMaxEntryAsk(candidate.dir)) {
+                  else if (candidate.askPrice > this.getMaxEntryAsk()) {
                     const skipKey = `maxask:${candidate.dir}:${candidate.askPrice.toFixed(2)}`;
                     if (skipKey !== this.lastEntrySkipKey) {
                       this.lastEntrySkipKey = skipKey;
-                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > DYN_MAX=${this.getMaxEntryAsk()}`);
+                      logger.warn(`Hedge15m Leg1 skipped: ask=${candidate.askPrice.toFixed(2)} > MAX_ENTRY_ASK=${this.getMaxEntryAsk()}`);
                     }
                     this.roundEntryAskRejects += 1;
                   }
@@ -1470,7 +1515,7 @@ export class Hedge15mEngine {
                     }
                     // 信号强一致(≥4源aligned)时跳过确认等待 — dump更可信
                     this.computeSignalAlignment(candidate.dir);
-                    const signalFastTrack = this.dirAlignedCount >= 4 && this.dirContraCount <= 1;
+                    const signalFastTrack = this.dirAlignedScore >= 5.0 && this.dirContraScore <= 1.5;
                     if (!signalFastTrack && this.dumpConfirmCount < this.rtDumpConfirmCycles) {
                       // 还未达到确认次数且信号不够强, 继续等
                     } else {
@@ -1549,6 +1594,20 @@ export class Hedge15mEngine {
           const secsHeld = this.leg1FilledAt > 0 ? (Date.now() - this.leg1FilledAt) / 1000 : 0;
           const sourceTag = this.leg1EntrySource === "dual-side-preorder" ? "预挂" : "砸盘";
           this.status = `纯持仓[${sourceTag}]: ${this.leg1Dir.toUpperCase()}@$${entryPrice.toFixed(2)} ${this.leg1Shares}份 EV+$${(this.leg1Shares * (1 - entryPrice)).toFixed(2)} ${secs.toFixed(0)}s → 等结算`;
+
+          // ── 极端反转预警: BTC 大幅逆向运动时记录日志供复盘 ──
+          if (!this._holdReversalLogged && this.roundStartBtcPrice > 0) {
+            const btcNow = getBtcPrice();
+            if (btcNow > 0) {
+              const btcMove = (btcNow - this.roundStartBtcPrice) / this.roundStartBtcPrice;
+              const adverse = (this.leg1Dir === "up" && btcMove < -0.005) || (this.leg1Dir === "down" && btcMove > 0.005);
+              if (adverse) {
+                this._holdReversalLogged = true;
+                logger.warn(`HOLD REVERSAL: ${this.leg1Dir.toUpperCase()} @${entryPrice.toFixed(2)} but BTC ${btcMove > 0 ? "+" : ""}${(btcMove * 100).toFixed(2)}% (held ${secsHeld.toFixed(0)}s, ${secs.toFixed(0)}s left)`);
+                this.writeRoundAudit("hold-reversal", { dir: this.leg1Dir, entryPrice, btcMove, secsHeld, secsLeft: secs });
+              }
+            }
+          }
         }
 
         // 回合最后30秒: 预加载下一轮市场
@@ -1577,9 +1636,11 @@ export class Hedge15mEngine {
         const { watchPollMs, idlePollMs } = getDynamicParams();
         const loopVersion = trader.getOrderbookVersion();
         const aggressiveWatchMs = this.currentTrendBias === "flat" ? watchPollMs : Math.max(25, Math.floor(watchPollMs * 0.5));
+        // 持仓期大部分时间用长 idle 轮询; 最后 15s 加速以精确捕获结算时刻
+        const holdPollMs = this.hedgeState === "leg1_filled" && secs <= 15 ? Math.min(500, idlePollMs) : idlePollMs;
         await trader.waitForOrderbookUpdate(
           loopVersion,
-          this.hedgeState === "watching" ? aggressiveWatchMs : idlePollMs,
+          this.hedgeState === "watching" ? aggressiveWatchMs : holdPollMs,
         );
 
       } catch (e: any) {
@@ -1617,7 +1678,7 @@ export class Hedge15mEngine {
       dir: dir as "up" | "down",
       askPrice,
       maxEntryAsk,
-      minEntryAsk: rnd.secondsLeft > 600 ? 0.15 : MIN_ENTRY_ASK,
+      minEntryAsk: rnd.secondsLeft > 720 ? 0.18 : rnd.secondsLeft > 420 ? 0.12 : MIN_ENTRY_ASK,
       directionalBias,
     });
     if (!plan.allowed) {
@@ -1657,23 +1718,35 @@ export class Hedge15mEngine {
     const bsFairRaw = bsEntry.fairRaw;
     const bsWinRate = bsEntry.fairKelly;
     const bsEdgeNet = bsEntry.effectiveEdge;
+    const alignmentScore = this.dirAlignedScore - this.dirContraScore;
+
     let minEdgeForRegime = directionalBias === "flat" ? FLAT_MIN_NET_EDGE : NON_FLAT_MIN_NET_EDGE;
     if (this.secondsLeft < 300) {
-      minEdgeForRegime = Math.max(0.02, minEdgeForRegime - 0.03); // 最后5分钟放宽
+      minEdgeForRegime = Math.max(0.02, minEdgeForRegime - 0.03);
     } else if (this.secondsLeft > 600) {
-      minEdgeForRegime += 0.02; // 倒计时10分钟以上要求提高
+      minEdgeForRegime += 0.02;
     }
+    // 信号共识微调: 每 1 分 score 降/升 0.5% 门槛，夹紧到 [3%, 12%]
+    minEdgeForRegime = Math.min(0.12, Math.max(0.03, minEdgeForRegime - alignmentScore * 0.005));
     if (bsEdgeNet < minEdgeForRegime) {
-      this.trackRoundRejectReason(`regime-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(minEdgeForRegime * 100).toFixed(0)}%`);
+      this.trackRoundRejectReason(`regime-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(minEdgeForRegime * 100).toFixed(1)}% sig=${alignmentScore.toFixed(1)}`);
       const skipKey = `regime-edge:${dir}:${directionalBias}:${askPrice.toFixed(2)}:${Math.floor(bsEdgeNet * 1000)}`;
       if (skipKey !== this.lastSignalSkipKey) {
         this.lastSignalSkipKey = skipKey;
-        logger.info(`HEDGE15M REACTIVE SKIP: ${directionalBias} edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(minEdgeForRegime * 100).toFixed(0)}%`);
+        logger.info(`HEDGE15M REACTIVE SKIP: ${directionalBias} edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(minEdgeForRegime * 100).toFixed(1)}% sig=${alignmentScore.toFixed(1)}`);
       }
       return;
     }
-
-    const alignmentScore = this.dirAlignedCount - this.dirContraCount;
+    const isContraTrend = directionalBias !== "flat" && directionalBias !== dir;
+    if (isContraTrend && bsEdgeNet < NON_FLAT_MIN_NET_EDGE + CONTRA_TREND_EXTRA_EDGE) {
+      this.trackRoundRejectReason(`contra-trend: bias=${directionalBias} dir=${dir} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+      const skipKey = `contra:${dir}:${directionalBias}:${Math.floor(bsEdgeNet * 1000)}`;
+      if (skipKey !== this.lastSignalSkipKey) {
+        this.lastSignalSkipKey = skipKey;
+        logger.info(`HEDGE15M REACTIVE SKIP: contra-trend bias=${directionalBias} edge ${(bsEdgeNet * 100).toFixed(1)}% < ${((NON_FLAT_MIN_NET_EDGE + CONTRA_TREND_EXTRA_EDGE) * 100).toFixed(0)}%`);
+      }
+      return;
+    }
     if (alignmentScore < REACTIVE_MIN_ALIGNMENT_SCORE && bsEdgeNet < REACTIVE_ALIGNMENT_EDGE_OVERRIDE) {
       this.trackRoundRejectReason(`alignment: score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
       const skipKey = `align:${dir}:${alignmentScore}:${Math.floor(bsEdgeNet * 1000)}`;
@@ -1700,28 +1773,28 @@ export class Hedge15mEngine {
     const kellyFull = (bsWinRate * odds - (1 - bsWinRate)) / odds;
     // ── EV+分层Kelly上限: 越便宜EV越高, 允许更大仓位 ──
     const kellyCapForPrice = askPrice <= 0.15 ? 0.45 : askPrice <= 0.20 ? 0.40 : askPrice <= 0.25 ? 0.35 : askPrice <= 0.30 ? 0.32 : askPrice <= 0.35 ? 0.30 : 0.27;
-    // 连亏缩仓: 每连亏1次Kelly×0.85, 最低×0.4, 赢1次重置
-    const lossScale = this.consecutiveLosses > 0 ? Math.max(0.6, Math.pow(0.95, this.consecutiveLosses)) : 1.0;
+    const lossScale = this.consecutiveLosses > 0 ? Math.max(0.5, Math.pow(0.90, this.consecutiveLosses)) : 1.0;
     const kellyBase = Math.max(0.08, Math.min(kellyCapForPrice, kellyFull * this.rtKellyFraction * lossScale));
     let budgetPct = kellyBase * netEdgeTier.multiplier;
-    // ── 强方向加仓: sum≤SUM_DIVERGENCE_MIN说明市场已极度一边倒, 砸盘胜率更高 ──
+    // ── 强方向连续 boost: sum 越低于 SUM_DIVERGENCE_MIN，砸盘越可信 ──
     const liveSum = this.upAsk + this.downAsk;
-    if (liveSum > 0 && liveSum <= SUM_DIVERGENCE_MIN) {
-      budgetPct = Math.min(kellyCapForPrice, budgetPct * 1.15); // 强方向×1.15
+    if (liveSum > 0 && liveSum < SUM_DIVERGENCE_MIN) {
+      const sumBoost = 1.0 + Math.max(0, (SUM_DIVERGENCE_MIN - liveSum)) * 0.75;
+      budgetPct = Math.min(kellyCapForPrice, budgetPct * sumBoost);
     }
     if (directionalBias === dir) {
-      budgetPct += TREND_BUDGET_BOOST; // 趋势一致追加
+      budgetPct += TREND_BUDGET_BOOST;
     } else if (directionalBias === "flat") {
-      budgetPct -= TREND_BUDGET_CUT;   // 中性减仓
-    }
-    // ── 统一7源信号Kelly调权: aligned多→加仓; mispricing路径不缩仓 ──
-    // 注: mispricing砸盘时BTC方向信号天然逆向(砸盘正是由BTC方向变动引起),
-    // MOMENTUM REJECT已过滤zero-sum重定价, 剩余contra信号不应惩罚仓位
-    if (this.dirAlignedCount >= 3) {
-      budgetPct *= 1.0 + (this.dirAlignedCount - 2) * 0.05; // 3→+5%, 4→+10%, 5→+15%...
-      logger.info(`KELLY SIG BOOST: aligned=${this.dirAlignedCount} contra=${this.dirContraCount} score=${alignmentScore} pct=${(budgetPct*100).toFixed(1)}% bsFair=${bsFairRaw.toFixed(3)} edgeRaw=${(bsEdgeNet*100).toFixed(1)}% tier=${netEdgeTier.label}`);
+      budgetPct -= TREND_BUDGET_CUT;
     } else {
-      logger.info(`KELLY SIG: aligned=${this.dirAlignedCount} contra=${this.dirContraCount} score=${alignmentScore} pct=${(budgetPct*100).toFixed(1)}% bsFair=${bsFairRaw.toFixed(3)} edgeRaw=${(bsEdgeNet*100).toFixed(1)}%`);
+      budgetPct *= CONTRA_TREND_SCALE;
+    }
+    // ── 加权 8 源信号 Kelly 调权: aligned 高→加仓 ──
+    if (this.dirAlignedScore >= 3.5) {
+      budgetPct *= 1.0 + (this.dirAlignedScore - 2.5) * 0.04; // 每多 1 分加 4%
+      logger.info(`KELLY SIG BOOST: aligned=${this.dirAlignedScore.toFixed(1)} contra=${this.dirContraScore.toFixed(1)} score=${alignmentScore.toFixed(1)} pct=${(budgetPct*100).toFixed(1)}% bsFair=${bsFairRaw.toFixed(3)} edgeRaw=${(bsEdgeNet*100).toFixed(1)}% tier=${netEdgeTier.label}`);
+    } else {
+      logger.info(`KELLY SIG: aligned=${this.dirAlignedScore.toFixed(1)} contra=${this.dirContraScore.toFixed(1)} score=${alignmentScore.toFixed(1)} pct=${(budgetPct*100).toFixed(1)}% bsFair=${bsFairRaw.toFixed(3)} edgeRaw=${(bsEdgeNet*100).toFixed(1)}%`);
     }
     budgetPct = Math.max(0.08, Math.min(kellyCapForPrice, budgetPct)); // EV+分层硬限 (低价→高上限)
 
@@ -1974,33 +2047,40 @@ export class Hedge15mEngine {
     const upInRange = upLimit >= DUAL_SIDE_MIN_ASK;
     const downInRange = downLimit >= DUAL_SIDE_MIN_ASK;
 
-    // ── 趋势方向过滤: 有明确趋势时撤销逆势侧预挂单 ──
+    // ── 趋势 + 信号方向过滤: bias 明确 或 加权信号共识足够时撤销逆势侧 ──
     const trend = this.currentTrendBias;
-    if (trend === "down" && this.preOrderUpId) {
+    this.computeSignalAlignment("up");
+    const upSignalScore = this.dirAlignedScore - this.dirContraScore;
+    this.computeSignalAlignment("down");
+    const dnSignalScore = this.dirAlignedScore - this.dirContraScore;
+    // 信号共识 >= 2.5 时也视为有方向，即使 bias 仍 flat
+    const signalFavorsDown = trend === "down" || (trend === "flat" && dnSignalScore >= 2.5 && upSignalScore < 1.0);
+    const signalFavorsUp = trend === "up" || (trend === "flat" && upSignalScore >= 2.5 && dnSignalScore < 1.0);
+    if (signalFavorsDown && this.preOrderUpId) {
       await trader.cancelOrder(this.preOrderUpId).catch(() => {});
       this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
-      logger.info(`DUAL SIDE: UP cancelled (trendBias=down, avoid counter-trend fill)`);
+      logger.info(`DUAL SIDE: UP cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)})`);
     }
-    if (trend === "up" && this.preOrderDownId) {
+    if (signalFavorsUp && this.preOrderDownId) {
       await trader.cancelOrder(this.preOrderDownId).catch(() => {});
       this.preOrderDownId = ""; this.preOrderDownPrice = 0; this.preOrderDownShares = 0;
-      logger.info(`DUAL SIDE: DOWN cancelled (trendBias=up, avoid counter-trend fill)`);
+      logger.info(`DUAL SIDE: DOWN cancelled (bias=${trend} upSig=${upSignalScore.toFixed(1)} dnSig=${dnSignalScore.toFixed(1)})`);
     }
 
     // ── Binance 方向过滤: BTC方向明确时撤销逆向侧预挂单 ──
     const btcDirPre = getBtcDirection();
     const btcMovePre = getBtcMovePct();
-    if (btcMovePre >= 0.0025) { // BTC 变动≥0.25%才取消逆向预挂单 (0.1%太敏感导致频繁取消→无法成交)
-    if (btcDirPre === "down" && this.preOrderUpId) {
-      await trader.cancelOrder(this.preOrderUpId).catch(() => {});
-      this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
-      logger.info(`DUAL SIDE: UP cancelled (BTC=down move=${(btcMovePre*100).toFixed(3)}%)`);
-    }
-    if (btcDirPre === "up" && this.preOrderDownId) {
-      await trader.cancelOrder(this.preOrderDownId).catch(() => {});
-      this.preOrderDownId = ""; this.preOrderDownPrice = 0; this.preOrderDownShares = 0;
-      logger.info(`DUAL SIDE: DOWN cancelled (BTC=up move=${(btcMovePre*100).toFixed(3)}%)`);
-    }
+    if (btcMovePre >= DUAL_SIDE_BTC_MOVE_BLOCK) {
+      if (btcDirPre === "down" && this.preOrderUpId) {
+        await trader.cancelOrder(this.preOrderUpId).catch(() => {});
+        this.preOrderUpId = ""; this.preOrderUpPrice = 0; this.preOrderUpShares = 0;
+        logger.info(`DUAL SIDE: UP cancelled (BTC=down move=${(btcMovePre * 100).toFixed(3)}%)`);
+      }
+      if (btcDirPre === "up" && this.preOrderDownId) {
+        await trader.cancelOrder(this.preOrderDownId).catch(() => {});
+        this.preOrderDownId = ""; this.preOrderDownPrice = 0; this.preOrderDownShares = 0;
+        logger.info(`DUAL SIDE: DOWN cancelled (BTC=up move=${(btcMovePre * 100).toFixed(3)}%)`);
+      }
     }
 
     // ── 低流动性过滤: spread过大时撤销所有预挂单 ──
@@ -2042,22 +2122,33 @@ export class Hedge15mEngine {
       const preOdds = price > 0 ? (1 - price) / price : 2.0;
       const preKelly = (fairKelly * preOdds - (1 - fairKelly)) / preOdds;
       const preKellyCap = price <= 0.15 ? 0.40 : price <= 0.20 ? 0.35 : price <= 0.25 ? 0.30 : 0.25;
-      const preLossScale = this.consecutiveLosses > 0 ? Math.max(0.6, Math.pow(0.95, this.consecutiveLosses)) : 1.0;
+      const preLossScale = this.consecutiveLosses > 0 ? Math.max(0.5, Math.pow(0.90, this.consecutiveLosses)) : 1.0;
       return Math.max(0.08, Math.min(preKellyCap, preKelly * this.rtKellyFraction * preLossScale));
     };
 
     const now = Date.now();
     const needRefresh = now - this.preOrderLastRefresh >= DUAL_SIDE_REFRESH_MS;
 
-    // ── BTC方向是否足以阻止单侧挂单: 必须变动≥0.25%才视为有方向 ──
-    const btcBlocksUp = btcMovePre >= 0.0025 && btcDirPre === "down";
-    const btcBlocksDn = btcMovePre >= 0.0025 && btcDirPre === "up";
+    // ── 时间权重: 剩余时间越多BSM越准、成交后持仓EV越高 → 早期挂单加仓 ──
+    const timeBoost = secs >= 700 ? 1.12 : secs >= 500 ? 1.0 : 0.85;
 
-    // ── UP 侧挂单管理 (趋势down/BTC强下时跳过, 低流动性时跳过) ──
-    if (!lowLiquidity && trend !== "down" && !btcBlocksUp && upInRange && !!upBsEntry?.allowed) {
+    // ── BTC + 信号方向倾斜: 综合 BTC 走势与加权信号分配仓位比例 ──
+    const btcBlocksUp = btcMovePre >= DUAL_SIDE_BTC_MOVE_BLOCK && btcDirPre === "down";
+    const btcBlocksDn = btcMovePre >= DUAL_SIDE_BTC_MOVE_BLOCK && btcDirPre === "up";
+    // 信号驱动 tilt: 每多 1 分加权共识 → 对齐侧 +6%，逆侧 -6%
+    const sigTiltUp = 1.0 + Math.max(-0.30, Math.min(0.30, upSignalScore * 0.06));
+    const sigTiltDn = 1.0 + Math.max(-0.30, Math.min(0.30, dnSignalScore * 0.06));
+    // 叠加 BTC 价格方向的微调
+    const btcTiltUp = btcMovePre >= 0.0008 && btcDirPre === "up" ? 1.10 : btcMovePre >= 0.0008 && btcDirPre === "down" ? 0.85 : 1.0;
+    const btcTiltDn = btcMovePre >= 0.0008 && btcDirPre === "down" ? 1.10 : btcMovePre >= 0.0008 && btcDirPre === "up" ? 0.85 : 1.0;
+    const tiltUp = sigTiltUp * btcTiltUp;
+    const tiltDn = sigTiltDn * btcTiltDn;
+
+    // ── UP 侧挂单管理 ──
+    if (!lowLiquidity && !signalFavorsDown && !btcBlocksUp && upInRange && !!upBsEntry?.allowed) {
       const upPreKellyCap = upLimit <= 0.15 ? 0.40 : upLimit <= 0.20 ? 0.35 : upLimit <= 0.25 ? 0.30 : 0.25;
       const upBudgetPct = Math.min(upPreKellyCap, calcPreBudgetPct(upLimit, upBsEntry.fairKelly) * this.getNetEdgeTier(upBsEntry.effectiveEdge).multiplier);
-      const upShares = Math.min(MAX_SHARES, Math.floor((this.balance * upBudgetPct * 0.7) / upLimit));
+      const upShares = Math.min(MAX_SHARES, Math.floor((this.balance * upBudgetPct * 0.7 * tiltUp * timeBoost) / upLimit));
       if (upShares >= MIN_SHARES) {
         const drift = Math.abs(upLimit - this.preOrderUpPrice);
         if (!this.preOrderUpId) {
@@ -2106,11 +2197,11 @@ export class Hedge15mEngine {
       logger.info(`DUAL SIDE: UP cancelled (${cancelReason})`);
     }
 
-    // ── DOWN 侧挂单管理 (趋势up/BTC强上时跳过, 低流动性时跳过) ──
-    if (!lowLiquidity && trend !== "up" && !btcBlocksDn && downInRange && !!downBsEntry?.allowed) {
+    // ── DOWN 侧挂单管理 ──
+    if (!lowLiquidity && !signalFavorsUp && !btcBlocksDn && downInRange && !!downBsEntry?.allowed) {
       const dnPreKellyCap = downLimit <= 0.15 ? 0.40 : downLimit <= 0.20 ? 0.35 : downLimit <= 0.25 ? 0.30 : 0.25;
       const dnBudgetPct = Math.min(dnPreKellyCap, calcPreBudgetPct(downLimit, downBsEntry.fairKelly) * this.getNetEdgeTier(downBsEntry.effectiveEdge).multiplier);
-      const dnShares = Math.min(MAX_SHARES, Math.floor((this.balance * dnBudgetPct * 0.7) / downLimit));
+      const dnShares = Math.min(MAX_SHARES, Math.floor((this.balance * dnBudgetPct * 0.7 * tiltDn * timeBoost) / downLimit));
       if (dnShares >= MIN_SHARES) {
         const drift = Math.abs(downLimit - this.preOrderDownPrice);
         if (!this.preOrderDownId) {
@@ -2169,14 +2260,12 @@ export class Hedge15mEngine {
     observedSum = 0,
   ): Promise<void> {
     const bsEntry = this.evaluateBsEntry(dir, fillPrice, this.secondsLeft, "dual-side");
-    // 任何价位成交如果被BSM拒绝都应该平仓，价格低不等于 EV+，
-    // 因为真实胜率(如5%)不支持哪怕 $0.20 的成本，必须严格止损以保持盈亏率。
-    if (!bsEntry.allowed) {
+    // 低价 maker: BSM 短时翻转时仍可能持有; 成交价过高则 BSM 拒单时倾向平仓
+    if (!bsEntry.allowed && fillPrice > DUAL_SIDE_KEEP_ON_BSM_REJECT) {
       this.logBsReject("dual-side-fill", dir, fillPrice, bsEntry);
       const unwind = await trader.placeFakSell(leg1Token, filledShares, this.negRisk).catch(() => null);
       if (unwind) {
         this.leg1AttemptedThisRound = true;
-        this.hedgeState = "done"; // 防止后续 reactive 逻辑重复判断导致刷屏或强入
         this.activeStrategyMode = "none";
         this.status = `预挂成交后立即平仓: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} x${filledShares.toFixed(0)}`;
         logger.warn(`DUAL SIDE UNWIND: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} rejected by BSM, sold immediately`);
@@ -2193,6 +2282,11 @@ export class Hedge15mEngine {
         return;
       }
       logger.error(`DUAL SIDE UNWIND FAILED: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} — keeping position to settlement`);
+    } else if (!bsEntry.allowed) {
+      // 低价成交: BSM reject但不unwind, 持有到结算仍EV+
+      logger.info(
+        `DUAL SIDE KEEP: ${dir.toUpperCase()} @${fillPrice.toFixed(2)} BSM rejected (${bsEntry.reason}) but fillPrice ≤ $${DUAL_SIDE_KEEP_ON_BSM_REJECT.toFixed(2)} — holding to settlement (EV+ at low price)`,
+      );
     }
 
     this.hedgeState = "leg1_filled";
@@ -2382,8 +2476,7 @@ export class Hedge15mEngine {
     }
 
     const entryAsk = orderbookPlan.entryAsk;
-    const allowedByOrderbook = orderbookPlan.suggestedShares ?? MAX_SHARES;
-    const entryShares = Math.min(MAX_SHARES, Math.floor(budget / entryAsk), allowedByOrderbook);
+    const entryShares = Math.min(MAX_SHARES, Math.floor(budget / entryAsk));
     if (entryShares < MIN_SHARES) {
       this.trackRoundRejectReason(`fresh shares ${entryShares} < ${MIN_SHARES}`);
       logger.warn(`Hedge15m Leg1 skipped (fresh): ${entryShares}份 < ${MIN_SHARES} @${entryAsk.toFixed(2)}`);
@@ -2402,10 +2495,10 @@ export class Hedge15mEngine {
       // ── Limit race offset + timeout: 按dump速度动态化 ──
       // 慢dump(8-12%): 价格回弹慢→maker成交概率高→等久点+小offset
       // 快dump(>15%): 价格恢复快→缩短等待+大offset抢成交
-      let limitOffset = Math.max(0.005, entryAsk * 0.05);
+      let limitOffset = LIMIT_RACE_OFFSET;
       let raceTimeout = LIMIT_RACE_TIMEOUT_MS;
       if (this.currentDumpDrop >= LIMIT_RACE_FAST_DUMP_THRESHOLD || this.currentDumpVelocity === "fast") {
-        limitOffset = Math.max(0.01, entryAsk * 0.10);
+        limitOffset = LIMIT_RACE_FAST_OFFSET;
         raceTimeout = 600;  // 快dump/快速度: 缩到600ms, 尽快成交
       } else if (this.currentDumpDrop < 0.12 && this.currentDumpVelocity === "slow") {
         raceTimeout = 1200; // 慢dump+慢速度: 等久点, maker成交概率更高
