@@ -40,6 +40,8 @@ const DUAL_SIDE_NEAR_LOW_TOLERANCE = 0.015;
 const DUAL_DUMP_MIN_DROP = 0.025;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.12;
+const SINGLE_BUDGET_PCT_CAP = 0.2;
+const SINGLE_PROFIT_REINVEST_PCT = 0.35;
 const SINGLE_MAX_SHARES = 60;
 const SINGLE_MAX_EFFECTIVE_COST = 0.30;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
@@ -56,12 +58,15 @@ const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
 const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
 const FIRST_LEG_FLAT_RANGE = 0.005;
 const FIRST_LEG_FLAT_NEAR_LOW = 0.01;
-const SECOND_LEG_TARGET_DISCOUNT = 0.03;
+const FIRST_LEG_OPPOSITE_HEADROOM = 0.02;
+const BUY_REPRICE_TOLERANCE = 0.01;
+const SECOND_LEG_TARGET_DISCOUNT = 0.04;
 const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.01;
 const SECOND_LEG_REBOUND_FROM_LOW = 0.02;
 const SECOND_LEG_TREND_WINDOW = 5;
 const SECOND_LEG_DOWNTREND_MIN_DROP = 0.01;
-const SECOND_LEG_DOWNTREND_TARGET_PAD = 0.015;
+const SECOND_LEG_DOWNTREND_TARGET_PAD = 0.006;
+const SECOND_LEG_ENTRY_PAD = 0.01;
 const SECOND_LEG_FLAT_RANGE = 0.005;
 const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
 const SINGLE_STOP_MAX_LOSS_PER_SHARE = 0.045;
@@ -522,6 +527,13 @@ export class Hedge15mEngine {
     return side === "up" ? this.upAvgFill : this.downAvgFill;
   }
 
+  private getSingleBudgetUsd(): number {
+    const baseBudget = this.balance * SINGLE_BUDGET_PCT;
+    const reinvestBudget = Math.max(0, this.sessionProfit) * SINGLE_PROFIT_REINVEST_PCT;
+    const cappedBudget = this.balance * SINGLE_BUDGET_PCT_CAP;
+    return Math.max(0, Math.min(baseBudget + reinvestBudget, cappedBudget));
+  }
+
   private getExitBidForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): number | null {
     const book = this.getSideBook(side, upBook, downBook);
     return book.bid != null && book.bid > 0 ? book.bid : null;
@@ -555,7 +567,7 @@ export class Hedge15mEngine {
       if (!legQuote || !oppositeQuote) continue;
 
       const legTotalCost = legQuote.rawCost * (1 + TAKER_FEE);
-      if (legTotalCost > this.balance * SINGLE_BUDGET_PCT) continue;
+      if (legTotalCost > this.getSingleBudgetUsd()) continue;
 
       const effectiveCost = legTotalCost / shares;
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
@@ -789,6 +801,54 @@ export class Hedge15mEngine {
     this.singleBestExitBid = 0;
   }
 
+  private recordAbortCloseOutcome(
+    reason: string,
+    grossCost: number,
+    recoveredValue: number,
+    primarySide: PairLegSide | null,
+    primaryShares: number,
+    fillPrice: number,
+    signalCost: number,
+    observedCost: number,
+    upFillPrice: number,
+    downFillPrice: number,
+  ): void {
+    const profit = recoveredValue - grossCost;
+    const result = profit >= 0 ? "WIN" : "LOSS";
+    if (result === "WIN") this.wins += 1;
+    else this.losses += 1;
+    this.totalProfit += profit;
+    this.sessionProfit += profit;
+    this.recordRollingPnL(profit);
+    this.history.push({
+      time: timeStr(),
+      result,
+      leg1Dir: primarySide ? primarySide.toUpperCase() : "PAIR",
+      leg1Price: signalCost || observedCost,
+      totalCost: round2(grossCost),
+      profit: round2(profit),
+      cumProfit: round2(this.totalProfit),
+      exitType: "abort",
+      exitReason: reason,
+      leg1Shares: primaryShares,
+      leg1FillPrice: round2(fillPrice),
+      orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
+      estimated: false,
+      profitBreakdown: `鍥炴敹$${recoveredValue.toFixed(2)} - 鎴愭湰$${grossCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      entrySource: this.activeStrategyMode,
+      pairMatchedShares: 0,
+      upFilledShares: this.upHeldShares,
+      downFilledShares: this.downHeldShares,
+      upFillPrice: round2(upFillPrice),
+      downFillPrice: round2(downFillPrice),
+      expectedPayout: 0,
+      pairSignalCost: round2(signalCost),
+      pairObservedCost: round2(observedCost),
+      winningLeg: "",
+    });
+    this.saveHistory();
+  }
+
   private resetRoundState(): void {
     this.hedgeState = "watching";
     this.status = "监控双边砸盘错价";
@@ -943,14 +1003,30 @@ export class Hedge15mEngine {
     }
   }
 
-  private async executeBuyLeg(trader: Trader, tokenId: string, shares: number, maxRawSpend: number, negRisk = false): Promise<LegFillResult | null> {
+  private async executeBuyLeg(
+    trader: Trader,
+    tokenId: string,
+    shares: number,
+    maxRawSpend: number,
+    maxAvgPrice: number,
+    negRisk = false,
+  ): Promise<LegFillResult | null> {
     const amount = Math.max(0, maxRawSpend);
-    if (shares <= 0 || amount <= 0) return null;
+    if (shares <= 0 || amount <= 0 || maxAvgPrice <= 0) return null;
+    const latestBook = await getHotBestPrices(trader, tokenId);
+    const latestQuote = latestBook ? this.quoteBuyShares(latestBook, shares) : null;
+    if (!latestQuote) return null;
+    if (latestQuote.avgPrice > maxAvgPrice + BUY_REPRICE_TOLERANCE) return null;
+    if (latestQuote.rawCost > amount + (shares * BUY_REPRICE_TOLERANCE)) return null;
     const response = await trader.placeFakBuy(tokenId, amount, negRisk);
     const orderId = response?.orderID || response?.order_id || "";
     if (!orderId) return null;
     const details = await trader.waitForOrderFillDetails(orderId, 1500);
     if (!Number.isFinite(details.filled) || details.filled <= 0 || !Number.isFinite(details.avgPrice) || details.avgPrice <= 0) {
+      return null;
+    }
+    if (details.avgPrice > maxAvgPrice + BUY_REPRICE_TOLERANCE) {
+      logger.warn(`buy fill repriced too high: token=${tokenId.slice(0, 12)} avg=${details.avgPrice.toFixed(3)} max=${maxAvgPrice.toFixed(3)}`);
       return null;
     }
     return { filled: details.filled, avgPrice: details.avgPrice, orderId: String(orderId).slice(0, 12) };
@@ -989,7 +1065,15 @@ export class Hedge15mEngine {
     this.lockedEdge = this.matchedShares > 0 ? (this.matchedShares - this.totalCost) / this.matchedShares : 0;
   }
 
-  private async abortUnhedgedPosition(trader: Trader): Promise<boolean> {
+  private async abortUnhedgedPosition(trader: Trader, reason = "abort-close"): Promise<boolean> {
+    const grossCost = this.totalCost;
+    const primarySide: PairLegSide | null = this.singleSide || (this.upHeldShares > 0 ? "up" : this.downHeldShares > 0 ? "down" : null);
+    const primaryShares = primarySide ? this.getHeldShares(primarySide) : Math.max(this.upHeldShares, this.downHeldShares);
+    const fillPrice = primarySide ? this.getSideAvgFill(primarySide) : 0;
+    const signalCost = this.signalCost;
+    const observedCost = this.observedCost;
+    const upFillPrice = this.upAvgFill;
+    const downFillPrice = this.downAvgFill;
     if (this.upHeldShares > 0 && this.upToken) {
       const closeUp = await this.executeSellLeg(trader, this.upToken, this.upHeldShares);
       if (closeUp) {
@@ -1012,6 +1096,10 @@ export class Hedge15mEngine {
     const residualUp = this.upHeldShares;
     const residualDown = this.downHeldShares;
     if (residualUp <= 0.0001 && residualDown <= 0.0001) {
+      const recoveredValue = grossCost - this.totalCost;
+      if (grossCost > 0) {
+        this.recordAbortCloseOutcome(reason, grossCost, recoveredValue, primarySide, primaryShares, fillPrice, signalCost, observedCost, upFillPrice, downFillPrice);
+      }
       this.clearOpenPosition();
       return true;
     }
@@ -1092,7 +1180,7 @@ export class Hedge15mEngine {
       dropPct >= SINGLE_MIN_DROP_PCT &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
       maxOther > 0 &&
-      quote.opposite.avgPrice <= maxOther + 0.08;
+      quote.opposite.avgPrice <= maxOther + FIRST_LEG_OPPOSITE_HEADROOM;
   }
 
   private allowNoExposureRetry(): void {
@@ -1134,7 +1222,7 @@ export class Hedge15mEngine {
       const secondToken = secondSide === "up" ? rnd.upToken : rnd.downToken;
       const firstQuote = firstSide === "up" ? pairQuote.up : pairQuote.down;
 
-      const firstFill = await this.executeBuyLeg(trader, firstToken, targetShares, firstQuote.rawCost, rnd.negRisk);
+      const firstFill = await this.executeBuyLeg(trader, firstToken, targetShares, firstQuote.rawCost, firstQuote.avgPrice, rnd.negRisk);
       if (!firstFill) {
         this.roundDecision = "第一腿未成交";
         this.status = "双腿下单失败";
@@ -1184,7 +1272,7 @@ export class Hedge15mEngine {
         return;
       }
 
-      const secondFill = await this.executeBuyLeg(trader, secondToken, secondShares, secondQuote.rawCost, rnd.negRisk);
+      const secondFill = await this.executeBuyLeg(trader, secondToken, secondShares, secondQuote.rawCost, secondQuote.avgPrice, rnd.negRisk);
       if (!secondFill) {
         const cleared = await this.abortUnhedgedPosition(trader);
         this.roundDecision = cleared ? "第二腿未成交, 已回滚" : "第二腿未成交, 回滚残余继续管理";
@@ -1276,7 +1364,7 @@ export class Hedge15mEngine {
 
     try {
       const token = this.getSideToken(rnd, quote.side);
-      const fill = await this.executeBuyLeg(trader, token, quote.shares, quote.leg.rawCost, rnd.negRisk);
+      const fill = await this.executeBuyLeg(trader, token, quote.shares, quote.leg.rawCost, quote.leg.avgPrice, rnd.negRisk);
       if (!fill) {
         this.status = "单边低价未成交";
         this.roundDecision = "单边第一腿未成交, 冷却后继续";
@@ -1352,7 +1440,7 @@ export class Hedge15mEngine {
   }
 
   private async abortStagedSingle(trader: Trader, reason: string): Promise<void> {
-    const cleared = await this.abortUnhedgedPosition(trader);
+    const cleared = await this.abortUnhedgedPosition(trader, reason);
     if (cleared) {
       this.hedgeState = "watching";
       this.activeStrategyMode = "paired-arb";
@@ -1434,6 +1522,7 @@ export class Hedge15mEngine {
     const targetOther = this.secondLegTargetPrice > 0
       ? this.secondLegTargetPrice
       : Math.max(0.01, maxOther - SECOND_LEG_TARGET_DISCOUNT);
+    const preferredEntryCap = Math.min(maxOther, targetOther + SECOND_LEG_ENTRY_PAD);
     this.pushSecondLegPrice(oppositeQuote.avgPrice);
     const trend = this.getSecondLegTrend();
     const flat = this.getSecondLegFlatSignal();
@@ -1453,6 +1542,7 @@ export class Hedge15mEngine {
       oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_FLAT_NEAR_LOW &&
       oppositeQuote.avgPrice <= maxOther;
     const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
+    const withinPreferredEntry = oppositeQuote.avgPrice <= preferredEntryCap;
     this.signalCost = projectedCost;
     const trendLabel = lowFlat ? " flat-low" : trend.falling ? " falling" : reboundedFromLow ? " rebound" : "";
     this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
@@ -1460,6 +1550,10 @@ export class Hedge15mEngine {
 
     if (!canLock) {
       if (expired) await this.abortStagedSingle(trader, "未等到可锁利对冲");
+      return;
+    }
+    if (!withinPreferredEntry) {
+      if (expired) await this.abortStagedSingle(trader, "琛ヨ吙浠锋牸鍋忚吹");
       return;
     }
     if (!hitTarget && !lowFlat && !fallingIntoTarget && !reboundedFromLow && !expired) {
@@ -1471,7 +1565,7 @@ export class Hedge15mEngine {
     this.roundDecision = `单边补腿锁利: ${projectedCost.toFixed(3)}`;
     try {
       const secondToken = this.getSideToken(rnd, oppositeSide);
-      const secondFill = await this.executeBuyLeg(trader, secondToken, heldShares, oppositeQuote.rawCost, rnd.negRisk);
+      const secondFill = await this.executeBuyLeg(trader, secondToken, heldShares, oppositeQuote.rawCost, preferredEntryCap, rnd.negRisk);
       if (!secondFill) {
         this.hedgeState = "single_open";
         this.roundDecision = "补腿未成交, 继续等待或回滚";
