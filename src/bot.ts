@@ -47,9 +47,27 @@ const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
 const SINGLE_MAX_HOLD_MS = 90_000;
 const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
+const SINGLE_MIN_DROP_FROM_HIGH = 0.08;
+const SINGLE_MIN_DROP_PCT = 0.18;
+const SINGLE_LOW_REBOUND_CONFIRM = 0.01;
+const SINGLE_LOW_CONFIRM_AFTER_MS = 1_500;
+const FIRST_LEG_TREND_WINDOW = 5;
+const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
+const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
+const FIRST_LEG_FLAT_RANGE = 0.005;
+const FIRST_LEG_FLAT_NEAR_LOW = 0.01;
 const SECOND_LEG_TARGET_DISCOUNT = 0.03;
 const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.01;
 const SECOND_LEG_REBOUND_FROM_LOW = 0.02;
+const SECOND_LEG_TREND_WINDOW = 5;
+const SECOND_LEG_DOWNTREND_MIN_DROP = 0.01;
+const SECOND_LEG_DOWNTREND_TARGET_PAD = 0.015;
+const SECOND_LEG_FLAT_RANGE = 0.005;
+const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
+const SINGLE_STOP_MAX_LOSS_PER_SHARE = 0.045;
+const SINGLE_STOP_MAX_LOSS_PCT = 0.18;
+const SINGLE_STOP_REBOUND_KEEP_PROFIT = 0.015;
+const SINGLE_STOP_BTC_MOVE_PCT = 0.0012;
 
 type EngineMode = "live" | "paper";
 type PairState = "off" | "watching" | "single_pending" | "single_open" | "pair_pending" | "pair_open" | "done";
@@ -303,6 +321,10 @@ export class Hedge15mEngine {
   private secondLegLowestAt = 0;
   private secondLegTargetPrice = 0;
   private secondLegMaxPrice = 0;
+  private secondLegRecentPrices: Array<{ ts: number; price: number }> = [];
+  private singleEntryBtcPrice = 0;
+  private singleEntryEffectiveCost = 0;
+  private singleBestExitBid = 0;
 
   private upToken = "";
   private downToken = "";
@@ -326,6 +348,10 @@ export class Hedge15mEngine {
     up: [],
     down: [],
   };
+  private sideRecentEffectiveCosts: Record<PairLegSide, Array<{ ts: number; cost: number }>> = {
+    up: [],
+    down: [],
+  };
   private roundStatsStartedAt = 0;
   private roundLowestPairCost = Number.POSITIVE_INFINITY;
   private roundHighestPairCost = 0;
@@ -334,6 +360,10 @@ export class Hedge15mEngine {
     down: Number.POSITIVE_INFINITY,
   };
   private roundHighestSideCost: Record<PairLegSide, number> = {
+    up: 0,
+    down: 0,
+  };
+  private roundLowestSideCostAt: Record<PairLegSide, number> = {
     up: 0,
     down: 0,
   };
@@ -492,6 +522,19 @@ export class Hedge15mEngine {
     return side === "up" ? this.upAvgFill : this.downAvgFill;
   }
 
+  private getExitBidForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): number | null {
+    const book = this.getSideBook(side, upBook, downBook);
+    return book.bid != null && book.bid > 0 ? book.bid : null;
+  }
+
+  private getBtcMoveAgainstSingle(side: PairLegSide): number {
+    const entry = this.singleEntryBtcPrice || this.roundStartBtcPrice;
+    const now = getBtcPrice();
+    if (entry <= 0 || now <= 0) return 0;
+    const move = (now - entry) / entry;
+    return side === "up" ? -move : move;
+  }
+
   private isStagedSingleEnabled(): boolean {
     return this.tradingMode === "paper" || STAGED_SINGLE_LIVE_ENABLED;
   }
@@ -590,6 +633,32 @@ export class Hedge15mEngine {
   private pushSideCost(side: PairLegSide, cost: number): void {
     if (!Number.isFinite(cost) || cost <= 0) return;
     this.recentSideCosts[side].push({ ts: Date.now(), cost });
+    this.sideRecentEffectiveCosts[side].push({ ts: Date.now(), cost });
+    if (this.sideRecentEffectiveCosts[side].length > FIRST_LEG_TREND_WINDOW) {
+      this.sideRecentEffectiveCosts[side] = this.sideRecentEffectiveCosts[side].slice(-FIRST_LEG_TREND_WINDOW);
+    }
+  }
+
+  private getSideCostTrend(side: PairLegSide): { falling: boolean; drop: number; flat: boolean; range: number } {
+    const samples = this.sideRecentEffectiveCosts[side];
+    if (samples.length < 3) return { falling: false, drop: 0, flat: false, range: 0 };
+    const prices = samples.map((item) => item.cost);
+    const first = prices[0];
+    const last = prices[prices.length - 1];
+    let fallingSteps = 0;
+    for (let index = 1; index < prices.length; index += 1) {
+      if (prices[index] <= prices[index - 1]) fallingSteps += 1;
+    }
+    const drop = first - last;
+    const high = Math.max(...prices);
+    const low = Math.min(...prices);
+    const range = high - low;
+    return {
+      falling: drop >= FIRST_LEG_DOWNTREND_MIN_DROP && fallingSteps >= prices.length - 2,
+      drop,
+      flat: samples.length >= FIRST_LEG_TREND_WINDOW && range <= FIRST_LEG_FLAT_RANGE,
+      range,
+    };
   }
 
   private resetRoundCostStats(): void {
@@ -598,14 +667,21 @@ export class Hedge15mEngine {
     this.roundHighestPairCost = 0;
     this.roundLowestSideCost = { up: Number.POSITIVE_INFINITY, down: Number.POSITIVE_INFINITY };
     this.roundHighestSideCost = { up: 0, down: 0 };
+    this.roundLowestSideCostAt = { up: 0, down: 0 };
   }
 
   private pushRoundCostStats(pairQuote: PairQuote): void {
     if (!Number.isFinite(pairQuote.signalCost) || pairQuote.signalCost <= 0) return;
     this.roundLowestPairCost = Math.min(this.roundLowestPairCost, pairQuote.signalCost);
     this.roundHighestPairCost = Math.max(this.roundHighestPairCost, pairQuote.signalCost);
-    this.roundLowestSideCost.up = Math.min(this.roundLowestSideCost.up, pairQuote.upEffectiveCost);
-    this.roundLowestSideCost.down = Math.min(this.roundLowestSideCost.down, pairQuote.downEffectiveCost);
+    if (pairQuote.upEffectiveCost < this.roundLowestSideCost.up) {
+      this.roundLowestSideCost.up = pairQuote.upEffectiveCost;
+      this.roundLowestSideCostAt.up = Date.now();
+    }
+    if (pairQuote.downEffectiveCost < this.roundLowestSideCost.down) {
+      this.roundLowestSideCost.down = pairQuote.downEffectiveCost;
+      this.roundLowestSideCostAt.down = Date.now();
+    }
     this.roundHighestSideCost.up = Math.max(this.roundHighestSideCost.up, pairQuote.upEffectiveCost);
     this.roundHighestSideCost.down = Math.max(this.roundHighestSideCost.down, pairQuote.downEffectiveCost);
   }
@@ -614,6 +690,42 @@ export class Hedge15mEngine {
     const observedMs = this.roundStatsStartedAt > 0 ? Date.now() - this.roundStatsStartedAt : 0;
     const elapsedSecs = ROUND_DURATION - secondsLeft;
     return observedMs >= GLOBAL_LOW_MIN_OBSERVATION_MS || elapsedSecs >= GLOBAL_LOW_MIN_OBSERVATION_MS / 1000;
+  }
+
+  private pushSecondLegPrice(price: number): void {
+    if (!Number.isFinite(price) || price <= 0) return;
+    this.secondLegRecentPrices.push({ ts: Date.now(), price });
+    if (this.secondLegRecentPrices.length > SECOND_LEG_TREND_WINDOW) {
+      this.secondLegRecentPrices = this.secondLegRecentPrices.slice(-SECOND_LEG_TREND_WINDOW);
+    }
+  }
+
+  private getSecondLegTrend(): { falling: boolean; drop: number } {
+    if (this.secondLegRecentPrices.length < 3) return { falling: false, drop: 0 };
+    const prices = this.secondLegRecentPrices.map((item) => item.price);
+    const first = prices[0];
+    const last = prices[prices.length - 1];
+    let fallingSteps = 0;
+    for (let index = 1; index < prices.length; index += 1) {
+      if (prices[index] <= prices[index - 1]) fallingSteps += 1;
+    }
+    const drop = first - last;
+    return {
+      falling: drop >= SECOND_LEG_DOWNTREND_MIN_DROP && fallingSteps >= prices.length - 2,
+      drop,
+    };
+  }
+
+  private getSecondLegFlatSignal(): { flat: boolean; range: number } {
+    if (this.secondLegRecentPrices.length < SECOND_LEG_TREND_WINDOW) return { flat: false, range: 0 };
+    const prices = this.secondLegRecentPrices.map((item) => item.price);
+    const high = Math.max(...prices);
+    const low = Math.min(...prices);
+    const range = high - low;
+    return {
+      flat: range <= SECOND_LEG_FLAT_RANGE,
+      range,
+    };
   }
 
   private getRecentLowestSingleCost(side: PairLegSide): number {
@@ -671,6 +783,10 @@ export class Hedge15mEngine {
     this.secondLegLowestAt = 0;
     this.secondLegTargetPrice = 0;
     this.secondLegMaxPrice = 0;
+    this.secondLegRecentPrices = [];
+    this.singleEntryBtcPrice = 0;
+    this.singleEntryEffectiveCost = 0;
+    this.singleBestExitBid = 0;
   }
 
   private resetRoundState(): void {
@@ -689,10 +805,15 @@ export class Hedge15mEngine {
     this.secondLegLowestAt = 0;
     this.secondLegTargetPrice = 0;
     this.secondLegMaxPrice = 0;
+    this.secondLegRecentPrices = [];
+    this.singleEntryBtcPrice = 0;
+    this.singleEntryEffectiveCost = 0;
+    this.singleBestExitBid = 0;
     this.upAsk = 0;
     this.downAsk = 0;
     this.recentPairCosts = [];
     this.recentSideCosts = { up: [], down: [] };
+    this.sideRecentEffectiveCosts = { up: [], down: [] };
     this.recentSingleCosts = { up: [], down: [] };
     this.resetRoundCostStats();
     this.bestObservedCost = 0;
@@ -797,6 +918,10 @@ export class Hedge15mEngine {
       this.secondLegTargetPrice = Math.max(0.01, maxOther - SECOND_LEG_TARGET_DISCOUNT);
       this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
       this.secondLegLowestAt = 0;
+      this.secondLegRecentPrices = [];
+      this.singleEntryEffectiveCost = firstEffectiveCost;
+      this.singleEntryBtcPrice = this.roundStartBtcPrice || getBtcPrice();
+      this.singleBestExitBid = 0;
     }
     this.hedgeState = this.singleSide ? "single_open" : "pair_open";
     this.status = this.singleSide
@@ -947,10 +1072,24 @@ export class Hedge15mEngine {
     if (!this.isStagedSingleEnabled()) return false;
     if (secondsLeft <= SINGLE_ENTRY_MIN_SECS) return false;
     if (this.singleAttemptedThisRound || Date.now() < this.singleRetryAfter) return false;
-    const recentLow = this.getRecentLowestSingleCost(quote.side);
-    const nearRecentLow = !Number.isFinite(recentLow) || quote.effectiveCost <= recentLow + SINGLE_NEAR_LOW_TOLERANCE;
+    if (!this.hasEnoughRoundObservation(secondsLeft)) return false;
+    const sideLow = this.roundLowestSideCost[quote.side];
+    const sideHigh = this.roundHighestSideCost[quote.side];
+    const lowAt = this.roundLowestSideCostAt[quote.side];
+    const dropAbs = sideHigh > 0 ? sideHigh - quote.effectiveCost : 0;
+    const dropPct = sideHigh > 0 ? dropAbs / sideHigh : 0;
+    const nearRoundLow = Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + SINGLE_NEAR_LOW_TOLERANCE;
+    const trend = this.getSideCostTrend(quote.side);
+    const fallingIntoLow = trend.falling && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_DOWNTREND_LOW_PAD;
+    const flatNearLow = trend.flat && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_FLAT_NEAR_LOW;
+    const reboundedFromLow = Number.isFinite(sideLow) &&
+      quote.effectiveCost <= sideLow + SINGLE_LOW_REBOUND_CONFIRM &&
+      lowAt > 0 &&
+      Date.now() - lowAt >= SINGLE_LOW_CONFIRM_AFTER_MS;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
-    return nearRecentLow &&
+    return (fallingIntoLow || flatNearLow || reboundedFromLow || (nearRoundLow && trend.falling)) &&
+      dropAbs >= SINGLE_MIN_DROP_FROM_HIGH &&
+      dropPct >= SINGLE_MIN_DROP_PCT &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
       maxOther > 0 &&
       quote.opposite.avgPrice <= maxOther + 0.08;
@@ -1170,6 +1309,10 @@ export class Hedge15mEngine {
       this.secondLegTargetPrice = targetOther;
       this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
       this.secondLegLowestAt = 0;
+      this.secondLegRecentPrices = [];
+      this.singleEntryEffectiveCost = filledEffectiveCost;
+      this.singleEntryBtcPrice = getBtcPrice();
+      this.singleBestExitBid = 0;
       this.entryReason = `SINGLE ${quote.side.toUpperCase()} @${this.observedCost.toFixed(3)} other<=${filledMaxOther.toFixed(3)}`;
       this.filledAt = Date.now();
       this.currentConditionId = rnd.conditionId;
@@ -1222,6 +1365,34 @@ export class Hedge15mEngine {
     this.persistRuntimeState();
   }
 
+  private getSingleStopReason(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): string | null {
+    const bid = this.getExitBidForSide(side, upBook, downBook);
+    if (bid == null) return null;
+    const exitEffective = bid * (1 - TAKER_FEE);
+    const entryEffective = this.singleEntryEffectiveCost || this.getSideAvgFill(side) * (1 + TAKER_FEE);
+    if (entryEffective <= 0) return null;
+
+    this.singleBestExitBid = Math.max(this.singleBestExitBid, bid);
+    const lossPerShare = entryEffective - exitEffective;
+    const lossPct = lossPerShare / entryEffective;
+    if (lossPerShare >= SINGLE_STOP_MAX_LOSS_PER_SHARE && lossPct >= SINGLE_STOP_MAX_LOSS_PCT) {
+      return `单边止损: 亏${lossPerShare.toFixed(3)}/份 (${(lossPct * 100).toFixed(1)}%)`;
+    }
+
+    const bestExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
+    const gaveBackProfit = bestExitEffective - exitEffective;
+    if (bestExitEffective > entryEffective && gaveBackProfit >= SINGLE_STOP_REBOUND_KEEP_PROFIT) {
+      return `单边止盈回撤: 从最佳bid回落${gaveBackProfit.toFixed(3)}/份`;
+    }
+
+    const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
+    if (adverseBtcMove >= SINGLE_STOP_BTC_MOVE_PCT && lossPerShare > 0) {
+      return `单边止损: BTC反向${(adverseBtcMove * 100).toFixed(2)}%`;
+    }
+
+    return null;
+  }
+
   private async hedgeStagedSingle(
     trader: Trader,
     rnd: Round15m,
@@ -1235,6 +1406,12 @@ export class Hedge15mEngine {
     const heldShares = Math.floor(this.getHeldShares(side));
     if (heldShares < MIN_SHARES) {
       await this.abortStagedSingle(trader, "持仓份额不足");
+      return;
+    }
+
+    const stopReason = this.getSingleStopReason(side, upBook, downBook);
+    if (stopReason) {
+      await this.abortStagedSingle(trader, stopReason);
       return;
     }
 
@@ -1257,6 +1434,9 @@ export class Hedge15mEngine {
     const targetOther = this.secondLegTargetPrice > 0
       ? this.secondLegTargetPrice
       : Math.max(0.01, maxOther - SECOND_LEG_TARGET_DISCOUNT);
+    this.pushSecondLegPrice(oppositeQuote.avgPrice);
+    const trend = this.getSecondLegTrend();
+    const flat = this.getSecondLegFlatSignal();
     if (oppositeQuote.avgPrice < this.secondLegLowestPrice) {
       this.secondLegLowestPrice = oppositeQuote.avgPrice;
       this.secondLegLowestAt = Date.now();
@@ -1267,16 +1447,22 @@ export class Hedge15mEngine {
       oppositeQuote.avgPrice <= maxOther &&
       oppositeQuote.avgPrice >= this.secondLegLowestPrice + SECOND_LEG_REBOUND_FROM_LOW;
     const hitTarget = oppositeQuote.avgPrice <= targetOther;
+    const fallingIntoTarget = trend.falling && oppositeQuote.avgPrice <= targetOther + SECOND_LEG_DOWNTREND_TARGET_PAD;
+    const lowFlat = flat.flat &&
+      Number.isFinite(this.secondLegLowestPrice) &&
+      oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_FLAT_NEAR_LOW &&
+      oppositeQuote.avgPrice <= maxOther;
     const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
     this.signalCost = projectedCost;
-    this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}`;
-    this.roundDecision = `补腿低 ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
+    const trendLabel = lowFlat ? " flat-low" : trend.falling ? " falling" : reboundedFromLow ? " rebound" : "";
+    this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
+    this.roundDecision = `补腿低 ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} range ${flat.range.toFixed(3)} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
 
     if (!canLock) {
       if (expired) await this.abortStagedSingle(trader, "未等到可锁利对冲");
       return;
     }
-    if (!hitTarget && !nearHoldLow && !reboundedFromLow && !expired) {
+    if (!hitTarget && !lowFlat && !fallingIntoTarget && !reboundedFromLow && !expired) {
       return;
     }
 

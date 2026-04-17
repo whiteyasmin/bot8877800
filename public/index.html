@@ -155,7 +155,7 @@ tr:hover{background:rgba(118,183,255,.03)}
 <div id="login-overlay">
   <div class="login-box">
     <h2>Vortex-15m</h2>
-    <p class="login-sub">BTC 15分钟双腿配对 · 错价对冲引擎</p>
+    <p class="login-sub">BTC 15分钟趋势分腿 · 锁利对冲引擎</p>
     <label>密码</label>
     <input type="password" id="pwd" autocomplete="current-password">
     <div style="margin-top:14px"><button class="btn-g" onclick="doLogin()" style="width:100%">登录</button></div>
@@ -211,8 +211,8 @@ tr:hover{background:rgba(118,183,255,.03)}
           <div class="r"><span class="k">BTC</span><span class="v" id="h-btc">--</span></div>
           <div class="r"><span class="k">UP Ask</span><span class="v" id="h-up-ev">--</span></div>
           <div class="r"><span class="k">DN Ask</span><span class="v" id="h-dn-ev">--</span></div>
-          <div class="r"><span class="k">配对成本 信号/成交</span><span class="v" id="h-bs-fair">--</span></div>
-          <div class="r"><span class="k">配对Edge 实时/锁定</span><span class="v" id="h-net-edge">--</span></div>
+          <div class="r"><span class="k">成本 信号/成交</span><span class="v" id="h-bs-fair">--</span></div>
+          <div class="r"><span class="k">Edge 实时/锁定</span><span class="v" id="h-net-edge">--</span></div>
           <div class="r"><span class="k">持仓</span><span class="v" id="h-leg1">--</span></div>
           <div class="r"><span class="k">执行方式</span><span class="v" id="h-preorder">--</span></div>
           <div class="r"><span class="k">目标成本</span><span class="v" id="h-expected">--</span></div>
@@ -220,11 +220,11 @@ tr:hover{background:rgba(118,183,255,.03)}
         </div>
         <div style="margin-top:8px;padding:8px;border-radius:6px;background:rgba(8,15,24,.6);font-size:11px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <span style="color:var(--muted);font-weight:600">配对监控</span>
+            <span style="color:var(--muted);font-weight:600">趋势分腿监控</span>
             <span id="dump-status" style="font-family:var(--mono)">--</span>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;color:var(--muted)">
-            <span>最近最低 <b id="dump-confirm" style="color:var(--text)">--</b></span>
+            <span>本局/近期低 <b id="dump-confirm" style="color:var(--text)">--</b></span>
             <span>锁定Edge <b id="dump-signals" style="color:var(--text)">--</b></span>
             <span>配对份数 <b id="dump-mom-rej" style="color:var(--text)">--</b></span>
             <span>预计回收 <b id="dump-ask-rej" style="color:var(--text)">--</b></span>
@@ -285,11 +285,11 @@ tr:hover{background:rgba(118,183,255,.03)}
       <div class="card c6">
         <h3>运行摘要</h3>
         <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px" id="params-bar">
-          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">双腿FAK</b></span>
+          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">趋势分腿FAK</b></span>
           <span style="color:var(--muted)">信号成本上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">执行成本上限 <b id="p-max-ask" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">最小锁定Edge <b id="p-edge-rule" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">最近最低 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">低点参考 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">开仓窗口 <b id="p-window" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">费用 <b style="color:var(--green)">taker 2%</b></span>
         </div>
@@ -617,5 +617,4 @@ function render(s) {
 </script>
 </body>
 </html>
-
 
