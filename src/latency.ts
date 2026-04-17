@@ -35,9 +35,7 @@ function summarize(bucket: LatencyBucket, fallbackP50: number, fallbackP90: numb
   if (bucket.count === 0) {
     return { p50: fallbackP50, p90: fallbackP90, count: 0, lastMs: 0, lastAt: 0 };
   }
-  const active = bucket.count < HISTORY_SIZE
-    ? bucket.samples.slice(0, bucket.count)
-    : bucket.samples.slice();
+  const active = bucket.samples.slice(0, bucket.count);
   const sorted = active.sort((a, b) => a - b);
   return {
     p50: sorted[Math.floor((sorted.length - 1) * 0.5)],
@@ -187,8 +185,8 @@ export function getDynamicParams(): {
     fillCheckMs:        lerp(30, 300,  120,  700),
     // watching 轮询间隔: 低延迟下轮询更密
     watchPollMs:        lerp(30, 300,   40,  120),
-    // leg1_filled/done 轮询间隔: 持仓期无操作，节省 API quota
-    idlePollMs:         lerp(30, 300, 2000, 5000),
+    // leg1/done 轮询间隔
+    idlePollMs:         lerp(30, 300,  150,  500),
     // 订单簿请求超时: 低延迟连接不需要那么长的超时
     orderbookTimeoutMs: lerp(30, 300, 1000, 4000),
     p50,

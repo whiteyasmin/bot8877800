@@ -44,13 +44,9 @@ function pct(num: number, den: number): number {
 
 export function loadHistoryEntries(filePath = HISTORY_FILE): HedgeHistoryEntry[] {
   if (!fs.existsSync(filePath)) return [];
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed?.history) ? parsed.history as HedgeHistoryEntry[] : [];
-  } catch {
-    return [];
-  }
+  const raw = fs.readFileSync(filePath, "utf8");
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed?.history) ? parsed.history as HedgeHistoryEntry[] : [];
 }
 
 export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTORY_FILE): AuditReport {
@@ -71,7 +67,7 @@ export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTOR
   for (const trade of history) {
     const profit = safeNumber(trade.profit);
     const cost = safeNumber(trade.totalCost);
-    const leg1Shares = safeNumber(trade.leg1Shares);
+    const leg1Shares = safeNumber(trade.pairMatchedShares ?? trade.leg1Shares);
     const exitType = trade.exitType || "unknown";
 
     exitTypeBreakdown[exitType] = (exitTypeBreakdown[exitType] || 0) + 1;
@@ -83,8 +79,8 @@ export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTOR
     if (profit > largestWin) largestWin = profit;
     if (profit < largestLoss) largestLoss = profit;
 
-    if (exitType === "settlement" && trade.result === "WIN") {
-      totalReturn += leg1Shares;
+    if (exitType === "settlement") {
+      totalReturn += safeNumber(trade.expectedPayout ?? leg1Shares);
     }
 
     runningProfit += profit;

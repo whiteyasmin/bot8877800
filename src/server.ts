@@ -9,6 +9,7 @@ import { loadAuditReport } from "./audit";
 import { Hedge15mEngine } from "./bot";
 import { getDecisionAuditFilePath, getLogFilePath } from "./instancePaths";
 import { logger } from "./logger";
+import { startLatencyMonitor } from "./latency";
 import * as fs from "fs";
 
 const app = express();
@@ -153,8 +154,7 @@ app.post("/api/start", auth, async (req, res) => {
     res.status(400).json({ error: "机器人已在运行" });
     return;
   }
-  const { privateKey, funderAddress, mode, paperBalance, paperSessionMode,
-    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction } = req.body;
+  const { privateKey, funderAddress, mode, paperBalance, paperSessionMode } = req.body;
   const tradingMode = mode === "paper" ? "paper" : "live";
   if (privateKey) updateConfig({ PRIVATE_KEY: privateKey });
   if (funderAddress) updateConfig({ FUNDER_ADDRESS: funderAddress });
@@ -163,22 +163,11 @@ app.post("/api/start", auth, async (req, res) => {
     res.status(400).json({ error: "缺少私钥或资金地址" });
     return;
   }
-  const safeNum = (v: unknown): number | undefined => {
-    if (v == null) return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
   try {
     await bot.start({
       mode: tradingMode,
-      paperBalance: (safeNum(paperBalance) ?? 0) > 0 ? safeNum(paperBalance) : undefined,
+      paperBalance: Number(paperBalance) > 0 ? Number(paperBalance) : undefined,
       paperSessionMode: paperSessionMode === "persistent" ? "persistent" : "session",
-      dumpConfirmCycles: safeNum(dumpConfirmCycles),
-      entryWindowPreset: entryWindowPreset || undefined,
-      maxEntryAsk: safeNum(maxEntryAsk),
-      dualSideMaxAsk: safeNum(dualSideMaxAsk),
-      kellyFraction: safeNum(kellyFraction),
     });
     res.json({
       ok: true,
@@ -187,8 +176,7 @@ app.post("/api/start", auth, async (req, res) => {
       paperSessionMode: bot.getState().paperSessionMode,
     });
   } catch (e: any) {
-    res.status(500).json({ error: "启动失败" });
-    logger.error(`/api/start error: ${e.message}`);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -212,9 +200,11 @@ app.get("/api/download-all", auth, (_req, res) => {
   const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出理由 |";
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
-    const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
+    const price = h.pairObservedCost > 0 ? h.pairObservedCost : (h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0);
+    const shares = h.pairMatchedShares || h.leg1Shares || 0;
+    const dir = h.winningLeg ? `PAIR/${String(h.winningLeg).toUpperCase()}` : (h.leg1Dir || "");
     const pf = h.profit >= 0 ? `+$${h.profit.toFixed(2)}` : `-$${Math.abs(h.profit).toFixed(2)}`;
-    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${h.entrySource || "-"} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
+    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${dir} | $${price.toFixed(2)} | ${Number(shares).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${h.entrySource || "-"} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
   });
 
   // ── Decision audit table ──
@@ -341,12 +331,10 @@ setInterval(() => {
   });
 }, 250);
 
-// Periodic session/login cleanup (every 5 min) to prevent slow memory growth
-setInterval(() => { pruneExpiredSessions(); pruneLoginAttempts(); }, 5 * 60_000);
-
 // --- Start ---
 
 export function startServer(): void {
+  startLatencyMonitor();
   const port = ServerConfig.PORT;
   server.listen(port, () => {
     console.log(`15分钟对冲机器人面板: http://localhost:${port}`);

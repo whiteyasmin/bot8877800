@@ -46,17 +46,12 @@ async function fetchEvent(slug: string): Promise<Record<string, any> | null> {
   return null;
 }
 
-const TOKEN_PARSE_CACHE_MAX = 200;
 const tokenParseCache = new Map<string, { up: string; down: string } | null>();
 
 function parseTokens(market: Record<string, any>): { up: string; down: string } | null {
   // 用conditionId做缓存key (同一市场token不会变)
   const cacheKey = market.conditionId || market.questionID || "";
   if (cacheKey && tokenParseCache.has(cacheKey)) return tokenParseCache.get(cacheKey)!;
-  if (tokenParseCache.size >= TOKEN_PARSE_CACHE_MAX) {
-    const oldest = tokenParseCache.keys().next().value;
-    if (oldest !== undefined) tokenParseCache.delete(oldest);
-  }
 
   let clobIds = market.clobTokenIds;
   let outcomes = market.outcomes;
@@ -115,7 +110,6 @@ export async function prefetchNextRound(): Promise<void> {
     const endStr = event.endDate || market.endDate;
     if (!endStr) { prefetchedSlug = ""; return; }
     prefetchedEndTime = new Date(endStr).getTime();
-    if (!Number.isFinite(prefetchedEndTime)) { prefetchedSlug = ""; return; }
     prefetchedRound = {
       market,
       upToken: tokens.up,
@@ -182,7 +176,6 @@ export async function getCurrentRound15m(): Promise<Round15m | null> {
   if (!endStr) return null;
 
   const endTime = new Date(endStr).getTime();
-  if (!Number.isFinite(endTime)) return null;
   const secondsLeft = clampRoundSeconds((endTime - Date.now()) / 1000);
   if (secondsLeft <= 0) {
     cache = null;

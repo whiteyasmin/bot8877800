@@ -76,11 +76,8 @@ export function estimateFilledShares(input: EstimatedFillInput): EstimatedFillRe
     return { confirmed: false, shares: 0 };
   }
 
-  const divisor = entryAsk * (1 + takerFee);
-  if (divisor <= 0) return { confirmed: false, shares: 0 };
-
   return {
     confirmed: true,
-    shares: Math.max(minShares, Math.floor(spent / divisor)),
+    shares: Math.max(minShares, Math.floor(spent / (entryAsk * (1 + takerFee)))),
   };
 }

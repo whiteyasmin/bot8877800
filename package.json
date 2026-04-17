@@ -6,12 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "npx tsx src/index.ts",
-    "audit": "npx tsx src/auditHistory.ts",
-    "simulate": "npx tsx src/simulate.ts",
-    "observe": "npx tsx src/observeAdaptive.ts",
-    "observe:compare": "npx tsx src/observeCompare.ts",
-    "optimize:dual": "npx tsx src/autoOptimizeDual.ts"
+    "dev": "npx tsx src/index.ts"
   },
   "dependencies": {
     "@ethersproject/wallet": "^5.7.0",
