@@ -32,7 +32,7 @@ const NEAR_LOW_TOLERANCE = 0.01;
 const SETTLEMENT_SAMPLE_DELAY_MS = 500;
 const HOT_BOOK_MAX_AGE_MS = 350;
 const ENTRY_RETRY_COOLDOWN_MS = 1_500;
-const MIN_OBSERVATION_MS = 90_000;
+const MIN_OBSERVATION_MS = 60_000;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
@@ -121,7 +121,7 @@ export interface HedgeHistoryEntry {
   winningLeg?: string;
 }
 
-/** Web/API 推送用快照（仅含当前面板与排障所需字段） */
+/** Web/API 鎺ㄩ€佺敤蹇収锛堜粎鍚綋鍓嶉潰鏉夸笌鎺掗殰鎵€闇€瀛楁锛?*/
 export interface Hedge15mState {
   botRunning: boolean;
   tradingMode: EngineMode;
@@ -312,8 +312,8 @@ export class Hedge15mEngine {
   private historyFile = getLiveHistoryFilePath();
   private loopRunId = 0;
 
-  private status = "空闲";
-  private roundDecision = "等待市场";
+  private status = "绌洪棽";
+  private roundDecision = "绛夊緟甯傚満";
   private balance = 0;
   private initialBankroll = 0;
   private totalProfit = 0;
@@ -890,7 +890,7 @@ export class Hedge15mEngine {
       leg1FillPrice: round2(fillPrice),
       orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
       estimated: false,
-      profitBreakdown: `鍥炴敹$${recoveredValue.toFixed(2)} - 鎴愭湰$${grossCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      profitBreakdown: `閸ョ偞鏁?${recoveredValue.toFixed(2)} - 閹存劖婀?${grossCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
       entrySource: this.activeStrategyMode,
       pairMatchedShares: 0,
       upFilledShares: this.upHeldShares,
@@ -907,10 +907,10 @@ export class Hedge15mEngine {
 
   private resetRoundState(): void {
     this.hedgeState = "watching";
-    this.status = "监控双边砸盘错价";
-    this.roundDecision = "等待UP/DOWN同时接近低点";
-    this.status = "等待单腿恐慌低价";
-    this.roundDecision = "先拿足够低的第一腿, 再等另一腿低价锁利";
+    this.status = "鐩戞帶鍙岃竟鐮哥洏閿欎环";
+    this.roundDecision = "wait for UP/DN near lows";
+    this.status = "绛夊緟鍗曡吙鎭愭厡浣庝环";
+    this.roundDecision = "take low first leg then wait second leg to lock edge";
     this.activeStrategyMode = "staged-single";
     this.pairAttemptedThisRound = false;
     this.pairEntryInFlight = false;
@@ -941,7 +941,7 @@ export class Hedge15mEngine {
 
   private setRoundSkipped(reason: string): void {
     this.hedgeState = "done";
-    this.status = `跳过: ${reason}`;
+    this.status = `璺宠繃: ${reason}`;
     this.roundDecision = this.status;
     this.skips += 1;
   }
@@ -1045,9 +1045,9 @@ export class Hedge15mEngine {
     }
     this.hedgeState = this.singleSide ? "single_open" : "pair_open";
     this.status = this.singleSide
-      ? `恢复单边低价: ${this.singleSide.toUpperCase()} ${this.getHeldShares(this.singleSide).toFixed(0)}份`
-      : `恢复双腿仓位: ${this.matchedShares.toFixed(0)}对`;
-    this.roundDecision = "已恢复持仓";
+      ? `restored single ${this.singleSide.toUpperCase()} ${this.getHeldShares(this.singleSide).toFixed(0)} shares`
+      : `restored pair ${this.matchedShares.toFixed(0)} pairs`;
+    this.roundDecision = "restored position";
   }
 
   private isActiveRun(runId: number): boolean {
@@ -1171,7 +1171,7 @@ export class Hedge15mEngine {
       this.hedgeState = "pair_open";
       this.activeStrategyMode = "rollback-residual-pair";
       this.singleSide = null;
-      this.status = `回滚未完全成交, 残余配对 ${this.matchedShares.toFixed(0)}对`;
+      this.status = `rollback residual pair ${this.matchedShares.toFixed(0)} pairs`;
     } else {
       this.singleSide = residualUp >= residualDown ? "up" : "down";
       this.singleOpenedAt = this.singleOpenedAt || Date.now();
@@ -1180,7 +1180,7 @@ export class Hedge15mEngine {
       this.lockedEdge = 0;
       this.hedgeState = "single_open";
       this.activeStrategyMode = "rollback-residual-single";
-      this.status = `回滚未完全成交, 残余${this.singleSide.toUpperCase()} ${held.toFixed(0)}份`;
+      this.status = `rollback residual ${this.singleSide.toUpperCase()} ${held.toFixed(0)} shares`;
     }
     logger.warn(`abort rollback left residual: up=${residualUp.toFixed(4)} down=${residualDown.toFixed(4)}`);
     this.persistRuntimeState();
@@ -1194,36 +1194,22 @@ export class Hedge15mEngine {
   }
 
   private evaluateStagedSingleEntry(quote: SingleLegQuote, secondsLeft: number): EntryCheck {
-    if (!this.isStagedSingleEnabled()) return { ok: false, reason: "分腿策略未启用" };
-    if (secondsLeft <= SINGLE_ENTRY_MIN_SECS) return { ok: false, reason: `剩余${Math.floor(secondsLeft)}s, 不开第一腿` };
-    if (this.singleAttemptedThisRound) return { ok: false, reason: "本轮已尝试第一腿" };
-    if (Date.now() < this.singleRetryAfter) return { ok: false, reason: "第一腿冷却中" };
-    if (!this.hasEnoughRoundObservation(secondsLeft)) return { ok: false, reason: "观察时间不足" };
+    if (!this.isStagedSingleEnabled()) return { ok: false, reason: "staged single disabled" };
+    if (secondsLeft <= SINGLE_ENTRY_MIN_SECS) return { ok: false, reason: `only ${Math.floor(secondsLeft)}s left` };
+    if (this.singleAttemptedThisRound) return { ok: false, reason: "single already attempted" };
+    if (Date.now() < this.singleRetryAfter) return { ok: false, reason: "single cooldown" };
+    if (!this.hasEnoughRoundObservation(secondsLeft)) return { ok: false, reason: "observation too short" };
+
     const sideLow = this.roundLowestSideCost[quote.side];
-    const sideHigh = this.roundHighestSideCost[quote.side];
-    const lowAt = this.roundLowestSideCostAt[quote.side];
-    const dropAbs = sideHigh > 0 ? sideHigh - quote.effectiveCost : 0;
-    const dropPct = sideHigh > 0 ? dropAbs / sideHigh : 0;
     const nearRoundLow = Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + SINGLE_NEAR_LOW_TOLERANCE;
-    const trend = this.getSideCostTrend(quote.side);
-    const fallingIntoLow = trend.falling && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_DOWNTREND_LOW_PAD;
-    const flatNearLow = trend.flat && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_FLAT_NEAR_LOW;
-    const reboundedFromLow = Number.isFinite(sideLow) &&
-      quote.effectiveCost <= sideLow + SINGLE_LOW_REBOUND_CONFIRM &&
-      lowAt > 0 &&
-      Date.now() - lowAt >= SINGLE_LOW_CONFIRM_AFTER_MS;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
-    const isPanicLow = fallingIntoLow || flatNearLow || reboundedFromLow;
-    if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} 未接近本局低点` };
-    if (!isPanicLow) return { ok: false, reason: `${quote.side.toUpperCase()} 不是恐慌低点形态` };
-    if (dropAbs < SINGLE_MIN_DROP_FROM_HIGH || dropPct < SINGLE_MIN_DROP_PCT) {
-      return { ok: false, reason: `${quote.side.toUpperCase()} 跌幅不够` };
-    }
-    if (quote.effectiveCost > SINGLE_MAX_EFFECTIVE_COST) return { ok: false, reason: `${quote.side.toUpperCase()} 第一腿太贵` };
-    if (quote.projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) return { ok: false, reason: "第二腿锁利空间不足" };
-    if (maxOther <= 0) return { ok: false, reason: "第二腿无法锁利" };
-    if (quote.opposite.avgPrice > maxOther + FIRST_LEG_OPPOSITE_HEADROOM) return { ok: false, reason: "对侧价格过贵" };
-    return { ok: true, reason: `第一腿${quote.side.toUpperCase()} 恐慌低价可进` };
+
+    if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} not near round low` };
+    if (quote.effectiveCost > SINGLE_MAX_EFFECTIVE_COST) return { ok: false, reason: `${quote.side.toUpperCase()} first leg too expensive` };
+    if (quote.projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) return { ok: false, reason: "second leg lock edge too small" };
+    if (maxOther <= 0) return { ok: false, reason: "second leg cannot lock edge" };
+
+    return { ok: true, reason: `first leg ${quote.side.toUpperCase()} allowed` };
   }
 
   private shouldOpenStagedSingle(quote: SingleLegQuote, secondsLeft: number): boolean {
@@ -1252,15 +1238,15 @@ export class Hedge15mEngine {
 
     const targetShares = pairQuote.shares;
     if (targetShares < MIN_SHARES) {
-      this.roundDecision = `错价触发但仓位不足 (${targetShares}份)`;
+      this.roundDecision = `pair target shares too small (${targetShares})`;
       return;
     }
 
     this.pairEntryInFlight = true;
     this.pairAttemptedThisRound = true;
     this.hedgeState = "pair_pending";
-    this.status = `双腿下单中: ${targetShares}对`;
-    this.roundDecision = `准备配对成本 ${pairQuote.signalCost.toFixed(3)} VWAP ${pairQuote.rawCostPerPair.toFixed(3)} 预期+$${pairQuote.expectedProfit.toFixed(2)}`;
+    this.status = `pair order pending ${targetShares} pairs`;
+    this.roundDecision = `鍑嗗閰嶅鎴愭湰 ${pairQuote.signalCost.toFixed(3)} VWAP ${pairQuote.rawCostPerPair.toFixed(3)} 棰勬湡+$${pairQuote.expectedProfit.toFixed(2)}`;
 
     try {
       const firstSide: PairLegSide = pairQuote.up.depth <= pairQuote.down.depth ? "up" : "down";
@@ -1271,8 +1257,8 @@ export class Hedge15mEngine {
 
       const firstFill = await this.executeBuyLeg(trader, firstToken, targetShares, firstQuote.rawCost, firstQuote.avgPrice, rnd.negRisk);
       if (!firstFill) {
-        this.roundDecision = "第一腿未成交";
-        this.status = "双腿下单失败";
+        this.roundDecision = "绗竴鑵挎湭鎴愪氦";
+        this.status = "鍙岃吙涓嬪崟澶辫触";
         this.hedgeState = "watching";
         this.allowNoExposureRetry();
         return;
@@ -1297,9 +1283,9 @@ export class Hedge15mEngine {
       const secondQuote = secondBook && secondShares >= MIN_SHARES ? this.quoteBuyShares(secondBook, secondShares) : null;
       if (!secondAsk || !secondQuote) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "第二腿盘口丢失, 已回滚" : "第二腿盘口丢失, 回滚残余继续管理";
+        this.roundDecision = cleared ? "second leg book missing, rolled back" : "second leg book missing, residual managed";
         if (cleared) {
-          this.status = "配对失败, 已回滚";
+          this.status = "pair failed, rolled back";
           this.hedgeState = "watching";
         }
         return;
@@ -1310,10 +1296,10 @@ export class Hedge15mEngine {
       if (projectedCost > MAX_EXEC_PAIR_COST) {
         const cleared = await this.abortUnhedgedPosition(trader);
         this.roundDecision = cleared
-          ? `第二腿追价过高 ${projectedCost.toFixed(3)}, 已回滚`
-          : `第二腿追价过高 ${projectedCost.toFixed(3)}, 回滚残余继续管理`;
+          ? `second leg too expensive ${projectedCost.toFixed(3)}, rolled back`
+          : `second leg too expensive ${projectedCost.toFixed(3)}, residual managed`;
         if (cleared) {
-          this.status = "配对失败, 已回滚";
+          this.status = "pair failed, rolled back";
           this.hedgeState = "watching";
         }
         return;
@@ -1322,9 +1308,9 @@ export class Hedge15mEngine {
       const secondFill = await this.executeBuyLeg(trader, secondToken, secondShares, secondQuote.rawCost, secondQuote.avgPrice, rnd.negRisk);
       if (!secondFill) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "第二腿未成交, 已回滚" : "第二腿未成交, 回滚残余继续管理";
+        this.roundDecision = cleared ? "second leg not filled, rolled back" : "second leg not filled, residual managed";
         if (cleared) {
-          this.status = "配对失败, 已回滚";
+          this.status = "pair failed, rolled back";
           this.hedgeState = "watching";
         }
         return;
@@ -1351,9 +1337,9 @@ export class Hedge15mEngine {
       await this.flattenResidual(trader);
       if (this.matchedShares < MIN_SHARES) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "配对份额不足, 已回滚" : "配对份额不足, 回滚残余继续管理";
+        this.roundDecision = cleared ? "pair shares too small, rolled back" : "pair shares too small, residual managed";
         if (cleared) {
-          this.status = "配对失败, 已回滚";
+          this.status = "pair failed, rolled back";
           this.hedgeState = "watching";
         }
         return;
@@ -1361,10 +1347,10 @@ export class Hedge15mEngine {
       if (this.lockedEdge <= 0) {
         const cleared = await this.abortUnhedgedPosition(trader);
         this.roundDecision = cleared
-          ? `实际成本无利润 ${this.observedCost.toFixed(3)}, 已回滚`
-          : `实际成本无利润 ${this.observedCost.toFixed(3)}, 回滚残余继续管理`;
+          ? `observed cost has no edge ${this.observedCost.toFixed(3)}, rolled back`
+          : `observed cost has no edge ${this.observedCost.toFixed(3)}, residual managed`;
         if (cleared) {
-          this.status = "配对实际无edge, 已回滚";
+          this.status = "pair no edge, rolled back";
           this.hedgeState = "watching";
         }
         return;
@@ -1376,8 +1362,8 @@ export class Hedge15mEngine {
       this.filledAt = Date.now();
       this.hedgeState = "pair_open";
       this.activeStrategyMode = "paired-arb";
-      this.status = `双腿已配对: ${this.matchedShares.toFixed(0)}对 @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `拿到低错价 ${this.observedCost.toFixed(3)} edge ${(this.lockedEdge * 100).toFixed(2)}%`;
+      this.status = `pair opened ${this.matchedShares.toFixed(0)} pairs @${this.observedCost.toFixed(3)}`;
+      this.roundDecision = `captured low mispricing ${this.observedCost.toFixed(3)} edge ${(this.lockedEdge * 100).toFixed(2)}%`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("pair-opened", {
@@ -1389,7 +1375,7 @@ export class Hedge15mEngine {
         observedCost: this.observedCost,
         lockedEdge: this.lockedEdge,
       });
-      logger.info(`PAIR OPENED: ${this.matchedShares.toFixed(0)}对 cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`);
+      logger.info(`PAIR OPENED: ${this.matchedShares.toFixed(0)} pairs cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`);
     } finally {
       this.pairEntryInFlight = false;
     }
@@ -1405,16 +1391,16 @@ export class Hedge15mEngine {
     this.pairEntryInFlight = true;
     this.singleAttemptedThisRound = true;
     this.hedgeState = "single_pending";
-      this.status = `单边低价下单中: ${quote.side.toUpperCase()} ${quote.shares}份`;
+    this.status = `single order pending ${quote.side.toUpperCase()} ${quote.shares} shares`;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
-    this.roundDecision = `单边${quote.side.toUpperCase()} ${quote.effectiveCost.toFixed(3)} 等待补腿 ≤${maxOther.toFixed(3)}`;
+    this.roundDecision = `single ${quote.side.toUpperCase()} ${quote.effectiveCost.toFixed(3)} wait other <= ${maxOther.toFixed(3)}`;
 
     try {
       const token = this.getSideToken(rnd, quote.side);
       const fill = await this.executeBuyLeg(trader, token, quote.shares, quote.leg.rawCost, quote.leg.avgPrice, rnd.negRisk);
       if (!fill) {
-        this.status = "单边低价未成交";
-        this.roundDecision = "单边第一腿未成交, 冷却后继续";
+        this.status = "first leg not filled";
+        this.roundDecision = "first leg not filled, retry after cooldown";
         this.hedgeState = "watching";
         this.allowSingleNoExposureRetry();
         return;
@@ -1457,20 +1443,20 @@ export class Hedge15mEngine {
       if (fill.filled < MIN_SHARES) {
         const cleared = await this.abortUnhedgedPosition(trader);
         if (cleared) {
-          this.status = "单边成交份额不足, 已回滚";
+          this.status = "single shares too small, rolled back";
           this.roundDecision = this.status;
           this.hedgeState = "watching";
           this.allowSingleNoExposureRetry();
         } else {
-          this.roundDecision = "单边小额残余未完全回滚, 继续管理";
+          this.roundDecision = "small residual after rollback, continue managing";
         }
         return;
       }
       this.hedgeState = "single_open";
       this.activeStrategyMode = "staged-single";
-      this.status = `单边低价持仓: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `等待补${this.getOppositeSide(quote.side).toUpperCase()} target≤${targetOther.toFixed(3)} max≤${filledMaxOther.toFixed(3)}`;
-      this.roundDecision = `等待补${this.getOppositeSide(quote.side).toUpperCase()} target≤${targetOther.toFixed(3)} max≤${filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
+      this.status = `single open ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)} shares @${this.observedCost.toFixed(3)}`;
+      this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)}`;
+      this.roundDecision = `绛夊緟琛?{this.getOppositeSide(quote.side).toUpperCase()} target鈮?{targetOther.toFixed(3)} max鈮?{filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-opened", {
@@ -1482,7 +1468,7 @@ export class Hedge15mEngine {
         effectiveCost: this.observedCost,
         maxOther: filledMaxOther,
       });
-      logger.info(`SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 cost=${this.observedCost.toFixed(3)} maxOther=${filledMaxOther.toFixed(3)}`);
+      logger.info(`SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)} shares cost=${this.observedCost.toFixed(3)} maxOther=${filledMaxOther.toFixed(3)}`);
     } finally {
       this.pairEntryInFlight = false;
     }
@@ -1493,11 +1479,11 @@ export class Hedge15mEngine {
     if (cleared) {
       this.hedgeState = "watching";
       this.activeStrategyMode = "staged-single";
-      this.status = `单边已回滚: ${reason}`;
+      this.status = `single rolled back ${reason}`;
       this.roundDecision = this.status;
       this.singleRetryAfter = Date.now() + ENTRY_RETRY_COOLDOWN_MS;
     } else {
-      this.roundDecision = `单边回滚未完全成交: ${reason}`;
+      this.roundDecision = `single rollback incomplete ${reason}`;
     }
     this.persistRuntimeState();
   }
@@ -1513,18 +1499,18 @@ export class Hedge15mEngine {
     const lossPerShare = entryEffective - exitEffective;
     const lossPct = lossPerShare / entryEffective;
     if (lossPerShare >= SINGLE_STOP_MAX_LOSS_PER_SHARE && lossPct >= SINGLE_STOP_MAX_LOSS_PCT) {
-      return `单边止损: 亏${lossPerShare.toFixed(3)}/份 (${(lossPct * 100).toFixed(1)}%)`;
+      return `鍗曡竟姝㈡崯: 浜?{lossPerShare.toFixed(3)}/浠?(${(lossPct * 100).toFixed(1)}%)`;
     }
 
     const bestExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
     const gaveBackProfit = bestExitEffective - exitEffective;
     if (bestExitEffective > entryEffective && gaveBackProfit >= SINGLE_STOP_REBOUND_KEEP_PROFIT) {
-      return `单边止盈回撤: 从最佳bid回落${gaveBackProfit.toFixed(3)}/份`;
+      return `take-profit giveback ${gaveBackProfit.toFixed(3)} per share`;
     }
 
     const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
     if (adverseBtcMove >= SINGLE_STOP_BTC_MOVE_PCT && lossPerShare > 0) {
-      return `单边止损: BTC反向${(adverseBtcMove * 100).toFixed(2)}%`;
+      return `鍗曡竟姝㈡崯: BTC鍙嶅悜${(adverseBtcMove * 100).toFixed(2)}%`;
     }
 
     return null;
@@ -1543,11 +1529,11 @@ export class Hedge15mEngine {
     const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
 
     if (lossPerShare >= SINGLE_ESCAPE_LOSS_PER_SHARE && lossPct >= SINGLE_ESCAPE_LOSS_PCT && adverseBtcMove >= SINGLE_ESCAPE_BTC_MOVE_PCT) {
-      return `错价失效: 亏损${lossPerShare.toFixed(3)}/份, BTC反向${(adverseBtcMove * 100).toFixed(2)}%`;
+      return `閿欎环澶辨晥: 浜忔崯${lossPerShare.toFixed(3)}/浠? BTC鍙嶅悜${(adverseBtcMove * 100).toFixed(2)}%`;
     }
 
     if (heldAgeMs >= SINGLE_ESCAPE_STALE_MS && lossPerShare > 0 && adverseBtcMove > 0) {
-      return `单腿超时且方向不利: ${Math.floor(heldAgeMs / 1000)}s`;
+      return `鍗曡吙瓒呮椂涓旀柟鍚戜笉鍒? ${Math.floor(heldAgeMs / 1000)}s`;
     }
 
     return null;
@@ -1565,7 +1551,7 @@ export class Hedge15mEngine {
     const oppositeSide = this.getOppositeSide(side);
     const heldShares = Math.floor(this.getHeldShares(side));
     if (heldShares < MIN_SHARES) {
-      await this.abortStagedSingle(trader, "持仓份额不足");
+      await this.abortStagedSingle(trader, "鎸佷粨浠介涓嶈冻");
       return;
     }
 
@@ -1586,8 +1572,8 @@ export class Hedge15mEngine {
     const secondLegPlan = this.buildSecondLegPlan(this.singleEntryEffectiveCost || (heldShares > 0 ? this.totalCost / heldShares : Number.POSITIVE_INFINITY));
     const expired = heldAgeMs >= secondLegPlan.holdMs || rnd.secondsLeft <= secondLegPlan.hedgeCutoffSecs;
     if (!oppositeQuote) {
-      this.status = `单边${side.toUpperCase()}等待对冲: 盘口深度不足`;
-      if (expired) await this.abortStagedSingle(trader, "等待对冲超时");
+      this.status = `single ${side.toUpperCase()} waiting hedge: insufficient book depth`;
+      if (expired) await this.abortStagedSingle(trader, "hedge wait timeout");
       return;
     }
 
@@ -1621,16 +1607,16 @@ export class Hedge15mEngine {
     const withinPreferredEntry = oppositeQuote.avgPrice <= preferredEntryCap;
     this.signalCost = projectedCost;
     const trendLabel = lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
-    this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
-    this.roundDecision = `补腿低 ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} range ${flat.range.toFixed(3)} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
+    this.status = `鍗曡竟${side.toUpperCase()}绛夎ˉ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
+    this.roundDecision = `琛ヨ吙浣?${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} range ${flat.range.toFixed(3)} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
 
-    this.roundDecision = `补腿低 ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
+    this.roundDecision = `琛ヨ吙浣?${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
     if (!canLock) {
-      if (expired) await this.abortStagedSingle(trader, "未等到可锁利对冲");
+      if (expired) await this.abortStagedSingle(trader, "鏈瓑鍒板彲閿佸埄瀵瑰啿");
       return;
     }
     if (!withinPreferredEntry) {
-      if (expired) await this.abortStagedSingle(trader, "琛ヨ吙浠锋牸鍋忚吹");
+      if (expired) await this.abortStagedSingle(trader, "second leg price never improved enough");
       return;
     }
     if (!hitTarget && !lowFlat && !reboundedFromLow && !(expired && nearHoldLow) ) {
@@ -1639,14 +1625,14 @@ export class Hedge15mEngine {
 
     this.pairEntryInFlight = true;
     this.hedgeState = "pair_pending";
-    this.roundDecision = `单边补腿锁利: ${projectedCost.toFixed(3)}`;
+    this.roundDecision = `hedging single position ${projectedCost.toFixed(3)}`;
     try {
       const secondToken = this.getSideToken(rnd, oppositeSide);
       const secondFill = await this.executeBuyLeg(trader, secondToken, heldShares, oppositeQuote.rawCost, preferredEntryCap, rnd.negRisk);
       if (!secondFill) {
         this.hedgeState = "single_open";
-        this.roundDecision = "补腿未成交, 继续等待或回滚";
-        if (expired) await this.abortStagedSingle(trader, "补腿未成交");
+        this.roundDecision = "second leg not filled, keep waiting or abort";
+        if (expired) await this.abortStagedSingle(trader, "second leg not filled");
         return;
       }
 
@@ -1669,10 +1655,10 @@ export class Hedge15mEngine {
 
       if (this.matchedShares < MIN_SHARES || this.lockedEdge <= 0) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "单边补腿后无有效edge, 已回滚" : "单边补腿后无有效edge, 回滚残余继续管理";
+        this.roundDecision = cleared ? "hedged but no valid edge, rolled back" : "hedged but no valid edge, residual managed";
         if (cleared) {
           this.hedgeState = "watching";
-          this.status = "单边对冲失败, 已回滚";
+          this.status = "single hedge failed, rolled back";
         }
         return;
       }
@@ -1682,8 +1668,8 @@ export class Hedge15mEngine {
       this.hedgeState = "pair_open";
       this.activeStrategyMode = "staged-single-hedged";
       this.entryReason = `STAGED cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`;
-      this.status = `单边已补腿成对: ${this.matchedShares.toFixed(0)}对 @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `单边低价对冲完成 edge ${(this.lockedEdge * 100).toFixed(2)}%`;
+      this.status = `single hedged ${this.matchedShares.toFixed(0)} pairs @${this.observedCost.toFixed(3)}`;
+      this.roundDecision = `single low-price hedge complete edge ${(this.lockedEdge * 100).toFixed(2)}%`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-hedged", {
@@ -1694,7 +1680,7 @@ export class Hedge15mEngine {
         observedCost: this.observedCost,
         lockedEdge: this.lockedEdge,
       });
-      logger.info(`SINGLE HEDGED: ${this.matchedShares.toFixed(0)}对 cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`);
+      logger.info(`SINGLE HEDGED: ${this.matchedShares.toFixed(0)} pairs cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`);
     } finally {
       this.pairEntryInFlight = false;
     }
@@ -1757,13 +1743,13 @@ export class Hedge15mEngine {
       cumProfit: round2(this.totalProfit),
       exitType: "settlement",
       exitReason: this.matchedShares > 0
-        ? `结算赢家: ${winningLeg.toUpperCase()} | 配对${this.matchedShares.toFixed(0)}对`
-        : `结算赢家: ${winningLeg.toUpperCase()} | 单边${primarySide?.toUpperCase() || "-"} ${primaryShares.toFixed(0)}份`,
+        ? `settlement winner: ${winningLeg.toUpperCase()} | pair ${this.matchedShares.toFixed(0)} pairs`
+        : `settlement winner: ${winningLeg.toUpperCase()} | single ${primarySide?.toUpperCase() || "-"} ${primaryShares.toFixed(0)} shares`,
       leg1Shares: primaryShares,
       leg1FillPrice: round2(primaryFillPrice),
       orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
       estimated: false,
-      profitBreakdown: `回收$${returnVal.toFixed(2)} - 成本$${this.totalCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      profitBreakdown: `鍥炴敹$${returnVal.toFixed(2)} - 鎴愭湰$${this.totalCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
       entrySource: this.activeStrategyMode,
       entryTrendBias: "flat",
       entrySecondsLeft: Math.floor(this.secondsLeft),
@@ -1797,8 +1783,8 @@ export class Hedge15mEngine {
     });
 
     logger.info(`PAIR SETTLED: ${result} winning=${winningLeg} payout=$${returnVal.toFixed(2)} cost=$${this.totalCost.toFixed(2)} profit=$${profit.toFixed(2)}`);
-    this.status = `结算: ${result} ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`;
-    this.roundDecision = `结算完成 ${winningLeg.toUpperCase()} 回收$${returnVal.toFixed(2)}`;
+    this.status = `settled: ${result} ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`;
+    this.roundDecision = `settlement complete ${winningLeg.toUpperCase()} payout $${returnVal.toFixed(2)}`;
     this.clearOpenPosition();
     this.hedgeState = "done";
     this.persistRuntimeState();
@@ -1813,8 +1799,8 @@ export class Hedge15mEngine {
         if (!this.isActiveRun(runId)) break;
 
         if (!round) {
-          this.status = "无15分钟市场,等待中...";
-          this.roundDecision = "等待新市场";
+          this.status = "no active 15m market, waiting";
+          this.roundDecision = "waiting for next market";
           this.secondsLeft = 0;
           setRoundSecsLeft(999);
           if (this.trader) {
@@ -1855,9 +1841,9 @@ export class Hedge15mEngine {
           });
 
           if (this.balance < MIN_BALANCE_TO_TRADE) {
-            this.setRoundSkipped(`余额$${this.balance.toFixed(2)} < $${MIN_BALANCE_TO_TRADE}`);
+            this.setRoundSkipped(`浣欓$${this.balance.toFixed(2)} < $${MIN_BALANCE_TO_TRADE}`);
           } else if (round.secondsLeft <= MIN_ENTRY_SECS) {
-            this.setRoundSkipped(`剩余${Math.floor(round.secondsLeft)}s < ${MIN_ENTRY_SECS}s`);
+            this.setRoundSkipped(`鍓╀綑${Math.floor(round.secondsLeft)}s < ${MIN_ENTRY_SECS}s`);
           }
         }
 
@@ -1879,9 +1865,9 @@ export class Hedge15mEngine {
         if (this.hedgeState === "single_open" && upBook && downBook) {
           await this.hedgeStagedSingle(trader, round, upBook, downBook);
         } else if (this.hedgeState === "pair_open") {
-          this.status = `双腿已配对: ${this.matchedShares.toFixed(0)}对 @${this.observedCost.toFixed(3)} edge ${(this.lockedEdge * 100).toFixed(2)}%`;
+          this.status = `pair opened ${this.matchedShares.toFixed(0)} pairs @${this.observedCost.toFixed(3)} edge ${(this.lockedEdge * 100).toFixed(2)}%`;
           if (round.secondsLeft <= 2) {
-            this.status = "即将结算...";
+            this.status = "settling soon";
             await this.settlePair();
           }
         } else if (this.hedgeState === "watching" && this.upAsk > 0 && this.downAsk > 0) {
@@ -1897,13 +1883,13 @@ export class Hedge15mEngine {
           const lockedEdge = 1 - signalCost;
           const observedSecs = this.roundStatsStartedAt > 0 ? Math.floor((Date.now() - this.roundStatsStartedAt) / 1000) : 0;
           this.status = pairQuote
-            ? `等本局双边低点: ${pairQuote.shares}对 VWAP ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
-            : `监控双腿错价: 可执行深度不足 cost ${signalCost.toFixed(3)}`;
-          this.roundDecision = `本局低 ${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / 当前 ${signalCost.toFixed(3)} / 观察${observedSecs}s`;
+            ? `watch first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
+            : `watching pair spread: insufficient executable depth cost ${signalCost.toFixed(3)}`;
+          this.roundDecision = `鏈眬浣?${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / 褰撳墠 ${signalCost.toFixed(3)} / 瑙傚療${observedSecs}s`;
 
           this.status = pairQuote
-            ? `等待第一腿恐慌低价: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
-            : `监控第一腿机会: 深度不足 cost ${signalCost.toFixed(3)}`;
+            ? `waiting first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
+            : `watching first-leg setup: insufficient depth cost ${signalCost.toFixed(3)}`;
           if (upBook && downBook && this.isStagedSingleEnabled()) {
             const singleQuotes = this.buildStagedSingleQuotes(upBook, downBook);
             for (const quote of singleQuotes) this.pushSingleCost(quote.side, quote.effectiveCost);
@@ -1916,7 +1902,7 @@ export class Hedge15mEngine {
               await this.openStagedSingle(trader, round, singleCandidate.quote);
             } else if (singleEvaluations.length > 0) {
               const bestRejected = singleEvaluations[0];
-              this.roundDecision = `未下单: ${bestRejected.check.reason}`;
+              this.roundDecision = `no trade: ${bestRejected.check.reason}`;
               this.maybeAuditNoTrade(bestRejected.check.reason, {
                 side: bestRejected.quote.side,
                 effectiveCost: round2(bestRejected.quote.effectiveCost),
@@ -1924,8 +1910,8 @@ export class Hedge15mEngine {
                 oppositeAsk: round2(bestRejected.quote.opposite.avgPrice),
               });
             } else {
-              this.roundDecision = "未下单: 盘口深度不足或第一腿过贵";
-              this.maybeAuditNoTrade("盘口深度不足或第一腿过贵", {
+              this.roundDecision = "no trade: insufficient depth or first leg too expensive";
+              this.maybeAuditNoTrade("insufficient depth or first leg too expensive", {
                 upAsk: this.upAsk,
                 downAsk: this.downAsk,
               });
@@ -1937,14 +1923,14 @@ export class Hedge15mEngine {
             : this.upAsk <= 0
               ? "UP"
               : "DN";
-          this.status = `等待有效盘口: ${missingSide} ask缺失`;
-          this.roundDecision = `未下单: ${missingSide} 缺少有效ask`;
-          this.maybeAuditNoTrade(`${missingSide} 缺少有效ask`, {
+          this.status = `waiting valid book: ${missingSide} ask missing`;
+          this.roundDecision = `no trade: ${missingSide} ask missing`;
+          this.maybeAuditNoTrade(`${missingSide} ask missing`, {
             upAsk: this.upAsk,
             downAsk: this.downAsk,
           });
         } else if (this.hedgeState === "done" && round.secondsLeft > MIN_ENTRY_SECS) {
-          this.status = "本轮已完成";
+          this.status = "round already completed";
         }
 
         this.diagnostics = trader.getDiagnostics();
@@ -1952,8 +1938,8 @@ export class Hedge15mEngine {
         await trader.waitForOrderbookUpdate(trader.getOrderbookVersion(), LOOP_SLEEP_MS);
       } catch (error: any) {
         logger.error(`mainLoop error: ${error.message}`);
-        this.status = `错误: ${error.message}`;
-        this.roundDecision = "主循环异常";
+        this.status = `閿欒: ${error.message}`;
+        this.roundDecision = "main loop error";
         await sleep(1000);
       }
     }
@@ -1976,8 +1962,8 @@ export class Hedge15mEngine {
     await startPriceFeed();
     this.running = true;
     this.loopRunId += 1;
-    this.status = this.tradingMode === "paper" ? "仿真盘就绪" : "实盘就绪";
-    this.roundDecision = "等待市场";
+    this.status = this.tradingMode === "paper" ? "paper ready" : "live ready";
+    this.roundDecision = "绛夊緟甯傚満";
 
     await this.refreshBalance();
     if (this.initialBankroll <= 0) {
@@ -1992,8 +1978,8 @@ export class Hedge15mEngine {
   stop(): void {
     this.running = false;
     this.loopRunId += 1;
-    this.status = "已停止";
-    this.roundDecision = "手动停止";
+    this.status = "stopped";
+    this.roundDecision = "鎵嬪姩鍋滄";
     this.hedgeState = "off";
     this.persistRuntimeState();
     stopPriceFeed();
