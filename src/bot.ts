@@ -385,6 +385,8 @@ export class Hedge15mEngine {
     down: [],
   };
   private diagnostics = defaultDiagnostics();
+  private lastNoTradeAuditReason = "";
+  private lastNoTradeAuditAt = 0;
 
   private loadHistory(): void {
     try {
@@ -419,6 +421,23 @@ export class Hedge15mEngine {
   private recordRollingPnL(profit: number): void {
     this.rollingPnL.push({ ts: Date.now(), profit });
     this.getRolling4hPnL();
+  }
+
+  private maybeAuditNoTrade(reason: string, extra: Record<string, unknown> = {}): void {
+    const normalized = String(reason || "").trim();
+    if (!normalized) return;
+    const now = Date.now();
+    if (normalized === this.lastNoTradeAuditReason && now - this.lastNoTradeAuditAt < 15_000) return;
+    this.lastNoTradeAuditReason = normalized;
+    this.lastNoTradeAuditAt = now;
+    writeDecisionAudit("no-trade", {
+      conditionId: this.currentConditionId,
+      market: this.currentMarket,
+      reason: normalized,
+      hedgeState: this.hedgeState,
+      secondsLeft: this.secondsLeft,
+      ...extra,
+    });
   }
 
   private calcSignalPairCost(upAsk: number, downAsk: number): number {
@@ -868,6 +887,8 @@ export class Hedge15mEngine {
     this.singleEntryBtcPrice = 0;
     this.singleEntryEffectiveCost = 0;
     this.singleBestExitBid = 0;
+    this.lastNoTradeAuditReason = "";
+    this.lastNoTradeAuditAt = 0;
     this.upAsk = 0;
     this.downAsk = 0;
     this.recentPairCosts = [];
@@ -1508,6 +1529,11 @@ export class Hedge15mEngine {
 
     const stopReason = this.getSingleEscapeReason(side, upBook, downBook);
     if (stopReason) {
+      this.maybeAuditNoTrade(stopReason, {
+        side,
+        heldShares,
+        entryEffectiveCost: round2(this.singleEntryEffectiveCost || this.observedCost),
+      });
       await this.abortStagedSingle(trader, stopReason);
       return;
     }
@@ -1844,8 +1870,18 @@ export class Hedge15mEngine {
             } else if (singleEvaluations.length > 0) {
               const bestRejected = singleEvaluations[0];
               this.roundDecision = `未下单: ${bestRejected.check.reason}`;
+              this.maybeAuditNoTrade(bestRejected.check.reason, {
+                side: bestRejected.quote.side,
+                effectiveCost: round2(bestRejected.quote.effectiveCost),
+                projectedPairCost: round2(bestRejected.quote.projectedPairCost),
+                oppositeAsk: round2(bestRejected.quote.opposite.avgPrice),
+              });
             } else {
               this.roundDecision = "未下单: 盘口深度不足或第一腿过贵";
+              this.maybeAuditNoTrade("盘口深度不足或第一腿过贵", {
+                upAsk: this.upAsk,
+                downAsk: this.downAsk,
+              });
             }
           }
         } else if (this.hedgeState === "done" && round.secondsLeft > MIN_ENTRY_SECS) {
