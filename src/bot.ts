@@ -39,6 +39,7 @@ const SINGLE_BUDGET_PCT_CAP = 0.2;
 const SINGLE_PROFIT_REINVEST_PCT = 0.35;
 const SINGLE_MAX_SHARES = 60;
 const SINGLE_MAX_EFFECTIVE_COST = 0.30;
+const SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST = 1.04;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
@@ -239,6 +240,11 @@ interface SingleLegQuote {
   effectiveCost: number;
   projectedPairCost: number;
   hedgeGap: number;
+}
+
+interface SingleQuoteBuildResult {
+  quote: SingleLegQuote | null;
+  reason: string;
 }
 
 interface EntryCheck {
@@ -618,28 +624,41 @@ export class Hedge15mEngine {
     return this.tradingMode === "paper" || STAGED_SINGLE_LIVE_ENABLED;
   }
 
-  private buildStagedSingleQuoteForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): SingleLegQuote | null {
+  private buildStagedSingleQuoteForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): SingleQuoteBuildResult {
     const legBook = this.getSideBook(side, upBook, downBook);
     const oppositeBook = this.getSideBook(this.getOppositeSide(side), upBook, downBook);
     const maxDepthShares = Math.floor(Math.min(
       this.getAskLevels(legBook).reduce((sum, level) => sum + level.size, 0),
       SINGLE_MAX_SHARES,
     ));
-    if (maxDepthShares < MIN_SHARES) return null;
+    if (maxDepthShares < MIN_SHARES) return { quote: null, reason: `${side.toUpperCase()} book depth too thin` };
 
     let best: SingleLegQuote | null = null;
+    let bestFailureReason = `${side.toUpperCase()} book depth too thin`;
     for (let shares = maxDepthShares; shares >= MIN_SHARES; shares -= 1) {
       const legQuote = this.quoteBuyShares(legBook, shares);
       const oppositeQuote = this.quoteBuyShares(oppositeBook, shares);
-      if (!legQuote || !oppositeQuote) continue;
+      if (!legQuote || !oppositeQuote) {
+        bestFailureReason = `${side.toUpperCase()} book depth too thin`;
+        continue;
+      }
 
       const legTotalCost = legQuote.rawCost * (1 + TAKER_FEE);
-      if (legTotalCost > this.getSingleBudgetUsd()) continue;
+      if (legTotalCost > this.getSingleBudgetUsd()) {
+        bestFailureReason = `${side.toUpperCase()} exceeds single-leg budget`;
+        continue;
+      }
 
       const effectiveCost = legTotalCost / shares;
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
-      if (effectiveCost > SINGLE_MAX_EFFECTIVE_COST) continue;
-      if (projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) continue;
+      if (effectiveCost > SINGLE_MAX_EFFECTIVE_COST) {
+        bestFailureReason = `${side.toUpperCase()} first leg too expensive`;
+        continue;
+      }
+      if (projectedPairCost > SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST) {
+        bestFailureReason = `${side.toUpperCase()} projected pair cost too high`;
+        continue;
+      }
 
       const quote: SingleLegQuote = {
         side,
@@ -660,12 +679,14 @@ export class Hedge15mEngine {
         best = quote;
       }
     }
-    return best;
+    return { quote: best, reason: best ? "" : bestFailureReason };
   }
 
-  private buildStagedSingleQuotes(upBook: BookSnapshot, downBook: BookSnapshot): SingleLegQuote[] {
-    return (["up", "down"] as PairLegSide[])
-      .map((side) => this.buildStagedSingleQuoteForSide(side, upBook, downBook))
+  private buildStagedSingleQuotes(upBook: BookSnapshot, downBook: BookSnapshot): { quotes: SingleLegQuote[]; reasons: string[] } {
+    const results = (["up", "down"] as PairLegSide[])
+      .map((side) => this.buildStagedSingleQuoteForSide(side, upBook, downBook));
+    const quotes = results
+      .map((result) => result.quote)
       .filter((quote): quote is SingleLegQuote => quote != null)
       .sort((left, right) => {
         if (Math.abs(left.effectiveCost - right.effectiveCost) > 1e-9) {
@@ -676,6 +697,8 @@ export class Hedge15mEngine {
         }
         return right.shares - left.shares;
       });
+    const reasons = results.filter((result) => !result.quote && result.reason).map((result) => result.reason);
+    return { quotes, reasons };
   }
 
   private getRecentLowestPairCost(): number {
@@ -1891,7 +1914,7 @@ export class Hedge15mEngine {
             ? `waiting first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
             : `watching first-leg setup: insufficient depth cost ${signalCost.toFixed(3)}`;
           if (upBook && downBook && this.isStagedSingleEnabled()) {
-            const singleQuotes = this.buildStagedSingleQuotes(upBook, downBook);
+            const { quotes: singleQuotes, reasons: singleBuildReasons } = this.buildStagedSingleQuotes(upBook, downBook);
             for (const quote of singleQuotes) this.pushSingleCost(quote.side, quote.effectiveCost);
             const singleEvaluations = singleQuotes.map((quote) => ({
               quote,
@@ -1910,8 +1933,9 @@ export class Hedge15mEngine {
                 oppositeAsk: round2(bestRejected.quote.opposite.avgPrice),
               });
             } else {
-              this.roundDecision = "no trade: insufficient depth or first leg too expensive";
-              this.maybeAuditNoTrade("insufficient depth or first leg too expensive", {
+              const buildReason = singleBuildReasons[0] || "insufficient depth or first leg too expensive";
+              this.roundDecision = `no trade: ${buildReason}`;
+              this.maybeAuditNoTrade(buildReason, {
                 upAsk: this.upAsk,
                 downAsk: this.downAsk,
               });
