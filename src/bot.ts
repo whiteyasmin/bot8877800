@@ -32,15 +32,24 @@ const NEAR_LOW_TOLERANCE = 0.01;
 const SETTLEMENT_SAMPLE_DELAY_MS = 500;
 const HOT_BOOK_MAX_AGE_MS = 350;
 const ENTRY_RETRY_COOLDOWN_MS = 1_500;
-const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE === "1";
+const GLOBAL_LOW_MIN_OBSERVATION_MS = 90_000;
+const GLOBAL_LOW_MIN_ENTRY_SECS = 120;
+const GLOBAL_LOW_PAIR_DROP_MIN = 0.03;
+const DUAL_DUMP_NEAR_LOW_TOLERANCE = 0.01;
+const DUAL_SIDE_NEAR_LOW_TOLERANCE = 0.015;
+const DUAL_DUMP_MIN_DROP = 0.025;
+const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_MAX_SHARES = 60;
-const SINGLE_MAX_EFFECTIVE_COST = 0.38;
-const SINGLE_MAX_PROJECTED_PAIR_COST = 1.025;
+const SINGLE_MAX_EFFECTIVE_COST = 0.30;
+const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
 const SINGLE_MAX_HOLD_MS = 90_000;
 const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
+const SECOND_LEG_TARGET_DISCOUNT = 0.03;
+const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.01;
+const SECOND_LEG_REBOUND_FROM_LOW = 0.02;
 
 type EngineMode = "live" | "paper";
 type PairState = "off" | "watching" | "single_pending" | "single_open" | "pair_pending" | "pair_open" | "done";
@@ -188,6 +197,8 @@ interface PairQuote {
   signalCost: number;
   lockedEdge: number;
   expectedProfit: number;
+  upEffectiveCost: number;
+  downEffectiveCost: number;
 }
 
 interface SingleLegQuote {
@@ -288,6 +299,10 @@ export class Hedge15mEngine {
   private singleRetryAfter = 0;
   private singleSide: PairLegSide | null = null;
   private singleOpenedAt = 0;
+  private secondLegLowestPrice = Number.POSITIVE_INFINITY;
+  private secondLegLowestAt = 0;
+  private secondLegTargetPrice = 0;
+  private secondLegMaxPrice = 0;
 
   private upToken = "";
   private downToken = "";
@@ -307,6 +322,21 @@ export class Hedge15mEngine {
   private filledAt = 0;
 
   private recentPairCosts: Array<{ ts: number; cost: number }> = [];
+  private recentSideCosts: Record<PairLegSide, Array<{ ts: number; cost: number }>> = {
+    up: [],
+    down: [],
+  };
+  private roundStatsStartedAt = 0;
+  private roundLowestPairCost = Number.POSITIVE_INFINITY;
+  private roundHighestPairCost = 0;
+  private roundLowestSideCost: Record<PairLegSide, number> = {
+    up: Number.POSITIVE_INFINITY,
+    down: Number.POSITIVE_INFINITY,
+  };
+  private roundHighestSideCost: Record<PairLegSide, number> = {
+    up: 0,
+    down: 0,
+  };
   private recentSingleCosts: Record<PairLegSide, Array<{ ts: number; cost: number }>> = {
     up: [],
     down: [],
@@ -415,6 +445,8 @@ export class Hedge15mEngine {
         signalCost,
         lockedEdge: 1 - signalCost,
         expectedProfit: shares * (1 - signalCost),
+        upEffectiveCost: upQuote.rawCost * (1 + TAKER_FEE) / shares,
+        downEffectiveCost: downQuote.rawCost * (1 + TAKER_FEE) / shares,
       };
       if (!monitorQuote) monitorQuote = quote;
       if (signalCost <= MAX_SIGNAL_PAIR_COST && quote.lockedEdge >= MIN_LOCKED_EDGE) {
@@ -434,6 +466,10 @@ export class Hedge15mEngine {
   private quotePairCost(firstTotalCost: number, secondRawCost: number, shares: number): number {
     if (!Number.isFinite(shares) || shares <= 0) return Number.POSITIVE_INFINITY;
     return (firstTotalCost + (secondRawCost * (1 + TAKER_FEE))) / shares + SIGNAL_SLIPPAGE_BUFFER;
+  }
+
+  private getMaxRawOtherPriceForLockedEdge(firstEffectiveCost: number, minEdge = MIN_LOCKED_EDGE): number {
+    return ((1 - minEdge - SIGNAL_SLIPPAGE_BUFFER) - firstEffectiveCost) / (1 + TAKER_FEE);
   }
 
   private getSideBook(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): BookSnapshot {
@@ -480,7 +516,7 @@ export class Hedge15mEngine {
 
       const effectiveCost = legTotalCost / shares;
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
-      if (effectiveCost > SINGLE_MAX_EFFECTIVE_COST || projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) continue;
+      if (effectiveCost > SINGLE_MAX_EFFECTIVE_COST) continue;
 
       const quote: SingleLegQuote = {
         side,
@@ -531,6 +567,55 @@ export class Hedge15mEngine {
     this.bestObservedCost = this.getRecentLowestPairCost();
   }
 
+  private getRecentLowestSideCost(side: PairLegSide): number {
+    const cutoff = this.roundStatsStartedAt > 0 ? this.roundStatsStartedAt : Date.now() - LOWEST_COST_LOOKBACK_MS;
+    this.recentSideCosts[side] = this.recentSideCosts[side].filter((item) => item.ts >= cutoff);
+    let best = Number.POSITIVE_INFINITY;
+    for (const item of this.recentSideCosts[side]) {
+      if (item.cost > 0 && item.cost < best) best = item.cost;
+    }
+    return best;
+  }
+
+  private getRecentHighestSideCost(side: PairLegSide): number {
+    const cutoff = this.roundStatsStartedAt > 0 ? this.roundStatsStartedAt : Date.now() - LOWEST_COST_LOOKBACK_MS;
+    this.recentSideCosts[side] = this.recentSideCosts[side].filter((item) => item.ts >= cutoff);
+    let worst = 0;
+    for (const item of this.recentSideCosts[side]) {
+      if (item.cost > worst) worst = item.cost;
+    }
+    return worst;
+  }
+
+  private pushSideCost(side: PairLegSide, cost: number): void {
+    if (!Number.isFinite(cost) || cost <= 0) return;
+    this.recentSideCosts[side].push({ ts: Date.now(), cost });
+  }
+
+  private resetRoundCostStats(): void {
+    this.roundStatsStartedAt = Date.now();
+    this.roundLowestPairCost = Number.POSITIVE_INFINITY;
+    this.roundHighestPairCost = 0;
+    this.roundLowestSideCost = { up: Number.POSITIVE_INFINITY, down: Number.POSITIVE_INFINITY };
+    this.roundHighestSideCost = { up: 0, down: 0 };
+  }
+
+  private pushRoundCostStats(pairQuote: PairQuote): void {
+    if (!Number.isFinite(pairQuote.signalCost) || pairQuote.signalCost <= 0) return;
+    this.roundLowestPairCost = Math.min(this.roundLowestPairCost, pairQuote.signalCost);
+    this.roundHighestPairCost = Math.max(this.roundHighestPairCost, pairQuote.signalCost);
+    this.roundLowestSideCost.up = Math.min(this.roundLowestSideCost.up, pairQuote.upEffectiveCost);
+    this.roundLowestSideCost.down = Math.min(this.roundLowestSideCost.down, pairQuote.downEffectiveCost);
+    this.roundHighestSideCost.up = Math.max(this.roundHighestSideCost.up, pairQuote.upEffectiveCost);
+    this.roundHighestSideCost.down = Math.max(this.roundHighestSideCost.down, pairQuote.downEffectiveCost);
+  }
+
+  private hasEnoughRoundObservation(secondsLeft: number): boolean {
+    const observedMs = this.roundStatsStartedAt > 0 ? Date.now() - this.roundStatsStartedAt : 0;
+    const elapsedSecs = ROUND_DURATION - secondsLeft;
+    return observedMs >= GLOBAL_LOW_MIN_OBSERVATION_MS || elapsedSecs >= GLOBAL_LOW_MIN_OBSERVATION_MS / 1000;
+  }
+
   private getRecentLowestSingleCost(side: PairLegSide): number {
     const cutoff = Date.now() - LOWEST_COST_LOOKBACK_MS;
     this.recentSingleCosts[side] = this.recentSingleCosts[side].filter((item) => item.ts >= cutoff);
@@ -539,6 +624,16 @@ export class Hedge15mEngine {
       if (item.cost > 0 && item.cost < best) best = item.cost;
     }
     return best;
+  }
+
+  private getRecentHighestPairCost(): number {
+    const cutoff = Date.now() - LOWEST_COST_LOOKBACK_MS;
+    this.recentPairCosts = this.recentPairCosts.filter((item) => item.ts >= cutoff);
+    let worst = 0;
+    for (const item of this.recentPairCosts) {
+      if (item.cost > worst) worst = item.cost;
+    }
+    return worst;
   }
 
   private pushSingleCost(side: PairLegSide, cost: number): void {
@@ -572,12 +667,16 @@ export class Hedge15mEngine {
     this.filledAt = 0;
     this.singleSide = null;
     this.singleOpenedAt = 0;
+    this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
+    this.secondLegLowestAt = 0;
+    this.secondLegTargetPrice = 0;
+    this.secondLegMaxPrice = 0;
   }
 
   private resetRoundState(): void {
     this.hedgeState = "watching";
-    this.status = this.isStagedSingleEnabled() ? "监控双腿错价/单边低价" : "监控双腿错价";
-    this.roundDecision = this.isStagedSingleEnabled() ? "等待最低配对成本或单边低价" : "等待最低配对成本";
+    this.status = "监控双边砸盘错价";
+    this.roundDecision = "等待UP/DOWN同时接近低点";
     this.activeStrategyMode = "paired-arb";
     this.pairAttemptedThisRound = false;
     this.pairEntryInFlight = false;
@@ -586,10 +685,16 @@ export class Hedge15mEngine {
     this.singleRetryAfter = 0;
     this.singleSide = null;
     this.singleOpenedAt = 0;
+    this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
+    this.secondLegLowestAt = 0;
+    this.secondLegTargetPrice = 0;
+    this.secondLegMaxPrice = 0;
     this.upAsk = 0;
     this.downAsk = 0;
     this.recentPairCosts = [];
+    this.recentSideCosts = { up: [], down: [] };
     this.recentSingleCosts = { up: [], down: [] };
+    this.resetRoundCostStats();
     this.bestObservedCost = 0;
   }
 
@@ -684,6 +789,15 @@ export class Hedge15mEngine {
           : null;
     this.singleSide = this.matchedShares > 0 ? null : restoredSingleSide;
     this.singleOpenedAt = this.singleSide ? this.filledAt : 0;
+    if (this.singleSide) {
+      const held = this.getHeldShares(this.singleSide);
+      const firstEffectiveCost = held > 0 ? this.totalCost / held : 0;
+      const maxOther = this.getMaxRawOtherPriceForLockedEdge(firstEffectiveCost);
+      this.secondLegMaxPrice = maxOther;
+      this.secondLegTargetPrice = Math.max(0.01, maxOther - SECOND_LEG_TARGET_DISCOUNT);
+      this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
+      this.secondLegLowestAt = 0;
+    }
     this.hedgeState = this.singleSide ? "single_open" : "pair_open";
     this.status = this.singleSide
       ? `恢复单边低价: ${this.singleSide.toUpperCase()} ${this.getHeldShares(this.singleSide).toFixed(0)}份`
@@ -800,11 +914,33 @@ export class Hedge15mEngine {
     return false;
   }
 
-  private shouldOpenPair(pairCost: number): boolean {
-    const recentLow = this.getRecentLowestPairCost();
-    const nearRecentLow = !Number.isFinite(recentLow) || pairCost <= recentLow + NEAR_LOW_TOLERANCE;
+  private shouldOpenPair(pairQuote: PairQuote, secondsLeft: number): boolean {
+    const pairCost = pairQuote.signalCost;
+    const roundLow = this.roundLowestPairCost;
+    const roundHigh = this.roundHighestPairCost;
+    const upLow = this.roundLowestSideCost.up;
+    const downLow = this.roundLowestSideCost.down;
+    const upHigh = this.roundHighestSideCost.up;
+    const downHigh = this.roundHighestSideCost.down;
+    const nearRoundPairLow = Number.isFinite(roundLow) && pairCost <= roundLow + DUAL_DUMP_NEAR_LOW_TOLERANCE;
+    const nearUpRoundLow = Number.isFinite(upLow) && pairQuote.upEffectiveCost <= upLow + DUAL_SIDE_NEAR_LOW_TOLERANCE;
+    const nearDownRoundLow = Number.isFinite(downLow) && pairQuote.downEffectiveCost <= downLow + DUAL_SIDE_NEAR_LOW_TOLERANCE;
+    const pairDumped = roundHigh <= 0 || roundHigh - pairCost >= GLOBAL_LOW_PAIR_DROP_MIN;
+    const upDumped = upHigh <= 0 || upHigh - pairQuote.upEffectiveCost >= DUAL_DUMP_MIN_DROP;
+    const downDumped = downHigh <= 0 || downHigh - pairQuote.downEffectiveCost >= DUAL_DUMP_MIN_DROP;
     const lockedEdge = 1 - pairCost;
-    return Date.now() >= this.pairRetryAfter && pairCost > 0 && pairCost <= MAX_SIGNAL_PAIR_COST && lockedEdge >= MIN_LOCKED_EDGE && nearRecentLow;
+    return Date.now() >= this.pairRetryAfter &&
+      this.hasEnoughRoundObservation(secondsLeft) &&
+      secondsLeft >= GLOBAL_LOW_MIN_ENTRY_SECS &&
+      pairCost > 0 &&
+      pairCost <= MAX_SIGNAL_PAIR_COST &&
+      lockedEdge >= MIN_LOCKED_EDGE &&
+      nearRoundPairLow &&
+      nearUpRoundLow &&
+      nearDownRoundLow &&
+      pairDumped &&
+      upDumped &&
+      downDumped;
   }
 
   private shouldOpenStagedSingle(quote: SingleLegQuote, secondsLeft: number): boolean {
@@ -813,10 +949,11 @@ export class Hedge15mEngine {
     if (this.singleAttemptedThisRound || Date.now() < this.singleRetryAfter) return false;
     const recentLow = this.getRecentLowestSingleCost(quote.side);
     const nearRecentLow = !Number.isFinite(recentLow) || quote.effectiveCost <= recentLow + SINGLE_NEAR_LOW_TOLERANCE;
+    const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
     return nearRecentLow &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
-      quote.projectedPairCost > MAX_SIGNAL_PAIR_COST &&
-      quote.projectedPairCost <= SINGLE_MAX_PROJECTED_PAIR_COST;
+      maxOther > 0 &&
+      quote.opposite.avgPrice <= maxOther + 0.08;
   }
 
   private allowNoExposureRetry(): void {
@@ -994,8 +1131,9 @@ export class Hedge15mEngine {
     this.pairEntryInFlight = true;
     this.singleAttemptedThisRound = true;
     this.hedgeState = "single_pending";
-    this.status = `单边低价下单中: ${quote.side.toUpperCase()} ${quote.shares}份`;
-    this.roundDecision = `单边${quote.side.toUpperCase()} ${quote.effectiveCost.toFixed(3)} 等待补腿, 预计配对 ${quote.projectedPairCost.toFixed(3)}`;
+      this.status = `单边低价下单中: ${quote.side.toUpperCase()} ${quote.shares}份`;
+    const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
+    this.roundDecision = `单边${quote.side.toUpperCase()} ${quote.effectiveCost.toFixed(3)} 等待补腿 ≤${maxOther.toFixed(3)}`;
 
     try {
       const token = this.getSideToken(rnd, quote.side);
@@ -1025,7 +1163,14 @@ export class Hedge15mEngine {
       this.signalCost = quote.projectedPairCost;
       this.observedCost = fill.filled > 0 ? this.totalCost / fill.filled : 0;
       this.lockedEdge = 0;
-      this.entryReason = `SINGLE ${quote.side.toUpperCase()} @${this.observedCost.toFixed(3)} hedge<=${MAX_EXEC_PAIR_COST.toFixed(3)}`;
+      const filledEffectiveCost = this.observedCost;
+      const filledMaxOther = this.getMaxRawOtherPriceForLockedEdge(filledEffectiveCost);
+      const targetOther = Math.max(0.01, filledMaxOther - SECOND_LEG_TARGET_DISCOUNT);
+      this.secondLegMaxPrice = filledMaxOther;
+      this.secondLegTargetPrice = targetOther;
+      this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
+      this.secondLegLowestAt = 0;
+      this.entryReason = `SINGLE ${quote.side.toUpperCase()} @${this.observedCost.toFixed(3)} other<=${filledMaxOther.toFixed(3)}`;
       this.filledAt = Date.now();
       this.currentConditionId = rnd.conditionId;
       this.currentNegRisk = rnd.negRisk;
@@ -1045,7 +1190,7 @@ export class Hedge15mEngine {
       this.hedgeState = "single_open";
       this.activeStrategyMode = "staged-single";
       this.status = `单边低价持仓: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `等待补${this.getOppositeSide(quote.side).toUpperCase()}腿对冲`;
+      this.roundDecision = `等待补${this.getOppositeSide(quote.side).toUpperCase()} target≤${targetOther.toFixed(3)} max≤${filledMaxOther.toFixed(3)}`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-opened", {
@@ -1055,9 +1200,9 @@ export class Hedge15mEngine {
         filled: fill.filled,
         avgFill: fill.avgPrice,
         effectiveCost: this.observedCost,
-        projectedPairCost: quote.projectedPairCost,
+        maxOther: filledMaxOther,
       });
-      logger.info(`SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 cost=${this.observedCost.toFixed(3)} projectedPair=${quote.projectedPairCost.toFixed(3)}`);
+      logger.info(`SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 cost=${this.observedCost.toFixed(3)} maxOther=${filledMaxOther.toFixed(3)}`);
     } finally {
       this.pairEntryInFlight = false;
     }
@@ -1105,12 +1250,33 @@ export class Hedge15mEngine {
 
     const projectedCost = this.quotePairCost(this.totalCost, oppositeQuote.rawCost, heldShares);
     const projectedEdge = 1 - projectedCost;
+    const firstEffectiveCost = heldShares > 0 ? this.totalCost / heldShares : Number.POSITIVE_INFINITY;
+    const maxOther = this.secondLegMaxPrice > 0
+      ? this.secondLegMaxPrice
+      : this.getMaxRawOtherPriceForLockedEdge(firstEffectiveCost);
+    const targetOther = this.secondLegTargetPrice > 0
+      ? this.secondLegTargetPrice
+      : Math.max(0.01, maxOther - SECOND_LEG_TARGET_DISCOUNT);
+    if (oppositeQuote.avgPrice < this.secondLegLowestPrice) {
+      this.secondLegLowestPrice = oppositeQuote.avgPrice;
+      this.secondLegLowestAt = Date.now();
+    }
+    const nearHoldLow = Number.isFinite(this.secondLegLowestPrice) &&
+      oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_NEAR_LOW_TOLERANCE;
+    const reboundedFromLow = Number.isFinite(this.secondLegLowestPrice) &&
+      oppositeQuote.avgPrice <= maxOther &&
+      oppositeQuote.avgPrice >= this.secondLegLowestPrice + SECOND_LEG_REBOUND_FROM_LOW;
+    const hitTarget = oppositeQuote.avgPrice <= targetOther;
+    const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
     this.signalCost = projectedCost;
-    this.status = `单边${side.toUpperCase()}等待对冲: pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
-    this.roundDecision = `补${oppositeSide.toUpperCase()}阈值 ≤${MAX_EXEC_PAIR_COST.toFixed(3)} / 当前 ${projectedCost.toFixed(3)}`;
+    this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}`;
+    this.roundDecision = `补腿低 ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
 
-    if (projectedCost > MAX_EXEC_PAIR_COST || projectedEdge < MIN_LOCKED_EDGE) {
+    if (!canLock) {
       if (expired) await this.abortStagedSingle(trader, "未等到可锁利对冲");
+      return;
+    }
+    if (!hitTarget && !nearHoldLow && !reboundedFromLow && !expired) {
       return;
     }
 
@@ -1366,16 +1532,21 @@ export class Hedge15mEngine {
           const signalCost = pairQuote?.signalCost ?? this.calcSignalPairCost(this.upAsk, this.downAsk);
           this.signalCost = signalCost;
           if (pairQuote) this.pushPairCost(signalCost);
-          const recentLow = this.getRecentLowestPairCost();
+          if (pairQuote) {
+            this.pushSideCost("up", pairQuote.upEffectiveCost);
+            this.pushSideCost("down", pairQuote.downEffectiveCost);
+            this.pushRoundCostStats(pairQuote);
+          }
           const lockedEdge = 1 - signalCost;
+          const observedSecs = this.roundStatsStartedAt > 0 ? Math.floor((Date.now() - this.roundStatsStartedAt) / 1000) : 0;
           this.status = pairQuote
-            ? `监控双腿错价: ${pairQuote.shares}对 VWAP cost ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}% exp +$${pairQuote.expectedProfit.toFixed(2)}`
+            ? `等本局双边低点: ${pairQuote.shares}对 VWAP ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
             : `监控双腿错价: 可执行深度不足 cost ${signalCost.toFixed(3)}`;
-          this.roundDecision = `最低 ${Number.isFinite(recentLow) ? recentLow.toFixed(3) : "--"} / 当前 ${signalCost.toFixed(3)}`;
+          this.roundDecision = `本局低 ${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / 当前 ${signalCost.toFixed(3)} / 观察${observedSecs}s`;
 
-          if (round.secondsLeft > MIN_ENTRY_SECS && pairQuote && this.shouldOpenPair(signalCost) && upBook && downBook) {
+          if (round.secondsLeft > MIN_ENTRY_SECS && pairQuote && this.shouldOpenPair(pairQuote, round.secondsLeft) && upBook && downBook) {
             await this.openHedgePair(trader, round, upBook, downBook, pairQuote);
-          } else if (upBook && downBook && !this.shouldOpenPair(signalCost)) {
+          } else if (upBook && downBook && this.isStagedSingleEnabled()) {
             const singleQuotes = this.buildStagedSingleQuotes(upBook, downBook);
             for (const quote of singleQuotes) this.pushSingleCost(quote.side, quote.effectiveCost);
             const singleQuote = singleQuotes.find((quote) => this.shouldOpenStagedSingle(quote, round.secondsLeft));
