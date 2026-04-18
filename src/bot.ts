@@ -621,6 +621,18 @@ export class Hedge15mEngine {
     return 300;
   }
 
+  private getFirstLegQualityReason(effectiveCost: number, sideLow: number): string | null {
+    const distanceToMid = 0.5 - effectiveCost;
+    if (distanceToMid <= 0.015) return "first leg too close to 0.5";
+    if (effectiveCost >= 0.46) return "first leg quality too weak";
+    if (!Number.isFinite(sideLow)) return null;
+
+    const reboundFromLow = effectiveCost - sideLow;
+    if (effectiveCost >= 0.42 && reboundFromLow > 0.008) return "first leg bounced too far off low";
+    if (effectiveCost >= 0.36 && reboundFromLow > 0.012) return "first leg bounced too far off low";
+    return null;
+  }
+
   private getExitBidForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): number | null {
     const book = this.getSideBook(side, upBook, downBook);
     return book.bid != null && book.bid > 0 ? book.bid : null;
@@ -1238,10 +1250,12 @@ export class Hedge15mEngine {
       !trend.falling;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
     const minSecsRequired = this.getSingleEntryMinSecs(quote.effectiveCost);
+    const firstLegQualityReason = this.getFirstLegQualityReason(quote.effectiveCost, sideLow);
 
     if (secondsLeft <= minSecsRequired) return { ok: false, reason: `only ${Math.floor(secondsLeft)}s left (<${minSecsRequired}s)` };
     if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} not near round low` };
     if (!lowFlat && !reboundedFromLow) return { ok: false, reason: `${quote.side.toUpperCase()} still falling` };
+    if (firstLegQualityReason) return { ok: false, reason: firstLegQualityReason };
     if (maxOther <= 0) return { ok: false, reason: "second leg cannot lock edge" };
 
     return { ok: true, reason: `first leg ${quote.side.toUpperCase()} allowed` };
