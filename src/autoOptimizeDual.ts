@@ -64,7 +64,6 @@ const CYCLES = Number(process.env.OPTIMIZE_CYCLES || "6");
 const LOSS_SHRINK_THRESHOLD = Number(process.env.LOSS_SHRINK_THRESHOLD || "8");
 const DRAWDOWN_SHRINK_THRESHOLD = Number(process.env.DRAWDOWN_SHRINK_THRESHOLD || "10");
 const SHRINK_FACTOR = Number(process.env.SHRINK_FACTOR || "0.75");
-const RECOVERY_STEP = Number(process.env.RECOVERY_STEP || "10");
 const MIN_PAPER_BALANCE = Number(process.env.MIN_PAPER_BALANCE || "40");
 const SUMMARY_FILE = path.join(process.cwd(), "data", "dual-optimize-summary.json");
 
@@ -213,13 +212,11 @@ async function stopIfRunning(request: (path: string, options?: RequestInit) => P
 }
 
 function adjustRuntimeBalance(state: InstanceRuntimeState, result: CycleResult): void {
+  state.paperBalance = Math.max(MIN_PAPER_BALANCE, Number((state.paperBalance + result.totalProfit).toFixed(2)));
+
   const hitLossThreshold = result.totalProfit <= -LOSS_SHRINK_THRESHOLD || result.maxDrawdown >= DRAWDOWN_SHRINK_THRESHOLD;
   if (hitLossThreshold) {
     state.paperBalance = Math.max(MIN_PAPER_BALANCE, Math.round(state.paperBalance * SHRINK_FACTOR));
-    return;
-  }
-  if (result.totalProfit > 0) {
-    state.paperBalance = Math.min(PAPER_BALANCE, state.paperBalance + RECOVERY_STEP);
   }
 }
 

@@ -325,6 +325,13 @@ export class Trader {
     return this.mode === "paper";
   }
 
+  setPaperBalance(balance: number): void {
+    if (this.mode !== "paper") return;
+    const parsed = Number(balance);
+    if (!Number.isFinite(parsed) || parsed < 0) return;
+    this.paperBalance = parsed;
+  }
+
   private nextPaperOrderId(prefix: string): string {
     this.paperOrderSeq += 1;
     return `paper-${prefix}-${Date.now()}-${this.paperOrderSeq}`;

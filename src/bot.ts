@@ -878,6 +878,7 @@ export class Hedge15mEngine {
     const state = loadPaperRuntimeState();
     if (!state) return;
     this.balance = state.balance > 0 ? state.balance : this.balance;
+    this.trader?.setPaperBalance(this.balance);
     this.initialBankroll = state.initialBankroll > 0 ? state.initialBankroll : this.initialBankroll;
     this.sessionProfit = state.sessionProfit;
     this.rollingPnL = state.rollingPnL || [];
