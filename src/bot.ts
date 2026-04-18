@@ -37,8 +37,11 @@ const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
 const SINGLE_PROFIT_REINVEST_PCT = 0.35;
+const SINGLE_RISK_BUDGET_PCT = 0.025;
+const SINGLE_RISK_BUDGET_PCT_CAP = 0.04;
+const SINGLE_RISK_PROFIT_REINVEST_PCT = 0.1;
 const SINGLE_MAX_SHARES = 60;
-const FIRST_LEG_MAX_ENTRY = 0.20;
+const FIRST_LEG_MAX_ENTRY = 0.30;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
@@ -325,7 +328,7 @@ export class Hedge15mEngine {
   private historyFile = getLiveHistoryFilePath();
   private loopRunId = 0;
 
-  private status = "绌洪棽";
+  private status = "idle";
   private roundDecision = "waiting for market";
   private balance = 0;
   private initialBankroll = 0;
@@ -530,14 +533,17 @@ export class Hedge15mEngine {
 
       const rawCostPerPair = rawCost / shares;
       const signalCost = (feeAdjustedCost / shares) + SIGNAL_SLIPPAGE_BUFFER;
+      const lockedEdge = 1 - signalCost;
+      const pairBudgetUsd = this.balance * this.getPairBudgetPctForEdge(lockedEdge);
+      if (feeAdjustedCost > pairBudgetUsd) continue;
       const quote = {
         shares,
         up: upQuote,
         down: downQuote,
         rawCostPerPair,
         signalCost,
-        lockedEdge: 1 - signalCost,
-        expectedProfit: shares * (1 - signalCost),
+        lockedEdge,
+        expectedProfit: shares * lockedEdge,
         upEffectiveCost: upQuote.rawCost * (1 + TAKER_FEE) / shares,
         downEffectiveCost: downQuote.rawCost * (1 + TAKER_FEE) / shares,
       };
@@ -592,6 +598,48 @@ export class Hedge15mEngine {
     return Math.max(0, Math.min(baseBudget + reinvestBudget, cappedBudget));
   }
 
+  private getSingleRiskBudgetUsd(): number {
+    const baseBudget = this.balance * SINGLE_RISK_BUDGET_PCT;
+    const reinvestBudget = Math.max(0, this.sessionProfit) * SINGLE_RISK_PROFIT_REINVEST_PCT;
+    const cappedBudget = this.balance * SINGLE_RISK_BUDGET_PCT_CAP;
+    return Math.max(0, Math.min(baseBudget + reinvestBudget, cappedBudget));
+  }
+
+  private getFirstLegSizeMultiplier(effectiveCost: number): number {
+    if (effectiveCost <= 0.1) return 1.2;
+    if (effectiveCost <= 0.16) return 1.0;
+    if (effectiveCost <= 0.22) return 0.8;
+    if (effectiveCost <= 0.26) return 0.6;
+    return 0.45;
+  }
+
+  private getHedgeRoomSizeMultiplier(effectiveCost: number): number {
+    const maxOther = this.getMaxRawOtherPriceForLockedEdge(effectiveCost);
+    if (maxOther >= 0.72) return 1.1;
+    if (maxOther >= 0.64) return 1.0;
+    if (maxOther >= 0.56) return 0.85;
+    return 0.7;
+  }
+
+  private getSingleWorstLossPerShare(effectiveCost: number): number {
+    return Math.max(SINGLE_ESCAPE_LOSS_PER_SHARE, effectiveCost * 0.35);
+  }
+
+  private getMaxSingleSharesForQuote(effectiveCost: number): number {
+    const sizeMultiplier = this.getFirstLegSizeMultiplier(effectiveCost) * this.getHedgeRoomSizeMultiplier(effectiveCost);
+    const riskBudget = this.getSingleRiskBudgetUsd() * sizeMultiplier;
+    const worstLossPerShare = this.getSingleWorstLossPerShare(effectiveCost);
+    if (riskBudget <= 0 || worstLossPerShare <= 0) return 0;
+    return Math.max(0, Math.min(SINGLE_MAX_SHARES, Math.floor(riskBudget / worstLossPerShare)));
+  }
+
+  private getPairBudgetPctForEdge(lockedEdge: number): number {
+    if (lockedEdge >= 0.08) return 0.7;
+    if (lockedEdge >= 0.06) return 0.55;
+    if (lockedEdge >= MIN_LOCKED_EDGE) return 0.4;
+    return 0.3;
+  }
+
   private buildSecondLegPlan(firstEffectiveCost: number): SingleSecondLegPlan {
     if (firstEffectiveCost <= 0.18) {
       return {
@@ -634,15 +682,15 @@ export class Hedge15mEngine {
   }
 
   private getFirstLegQualityReason(effectiveCost: number, sideLow: number): string | null {
-    if (effectiveCost > FIRST_LEG_MAX_ENTRY) return `first leg above ${FIRST_LEG_MAX_ENTRY.toFixed(2)}`;
+    if (effectiveCost > FIRST_LEG_MAX_ENTRY) return `第一腿高于 ${FIRST_LEG_MAX_ENTRY.toFixed(2)}`;
     const distanceToMid = 0.5 - effectiveCost;
-    if (distanceToMid <= 0.04) return "first leg too close to 0.5";
-    if (effectiveCost >= 0.42) return "first leg quality too weak";
+    if (distanceToMid <= 0.04) return "第一腿离 0.5 太近";
+    if (effectiveCost >= 0.42) return "第一腿质量太弱";
     if (!Number.isFinite(sideLow)) return null;
 
     const reboundFromLow = effectiveCost - sideLow;
-    if (effectiveCost >= 0.38 && reboundFromLow > 0.006) return "first leg bounced too far off low";
-    if (effectiveCost >= 0.30 && reboundFromLow > 0.01) return "first leg bounced too far off low";
+    if (effectiveCost >= 0.28 && reboundFromLow > 0.008) return "第一腿离低点反弹过多";
+    if (effectiveCost >= 0.20 && reboundFromLow > 0.012) return "第一腿离低点反弹过多";
     return null;
   }
 
@@ -689,6 +737,11 @@ export class Hedge15mEngine {
       }
 
       const effectiveCost = legTotalCost / shares;
+      const maxAllowedShares = this.getMaxSingleSharesForQuote(effectiveCost);
+      if (shares > maxAllowedShares) {
+        bestFailureReason = `${side.toUpperCase()} exceeds risk-sized shares`;
+        continue;
+      }
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
 
       const quote: SingleLegQuote = {
@@ -961,10 +1014,8 @@ export class Hedge15mEngine {
 
   private resetRoundState(): void {
     this.hedgeState = "watching";
-    this.status = "watch first-leg low";
-    this.roundDecision = "wait for UP/DN near lows";
     this.status = "waiting first-leg low";
-    this.roundDecision = "take low first leg then wait second leg to lock edge";
+    this.roundDecision = "take low first leg then wait second-leg rebound";
     this.activeStrategyMode = "staged-single";
     this.pairAttemptedThisRound = false;
     this.pairEntryInFlight = false;
@@ -995,7 +1046,7 @@ export class Hedge15mEngine {
 
   private setRoundSkipped(reason: string): void {
     this.hedgeState = "done";
-    this.status = `璺宠繃: ${reason}`;
+    this.status = `skip: ${reason}`;
     this.roundDecision = this.status;
     this.skips += 1;
   }
@@ -1267,7 +1318,7 @@ export class Hedge15mEngine {
 
     if (secondsLeft <= minSecsRequired) return { ok: false, reason: `only ${Math.floor(secondsLeft)}s left (<${minSecsRequired}s)` };
     if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} not near round low` };
-    if (!lowFlat && !reboundedFromLow) return { ok: false, reason: `${quote.side.toUpperCase()} still falling` };
+    if (!reboundedFromLow) return { ok: false, reason: `${quote.side.toUpperCase()} no rebound from low` };
     if (firstLegQualityReason) return { ok: false, reason: firstLegQualityReason };
     if (maxOther <= 0) return { ok: false, reason: "second leg cannot lock edge" };
 
@@ -1319,8 +1370,8 @@ export class Hedge15mEngine {
 
       const firstFill = await this.executeBuyLeg(trader, firstToken, targetShares, firstQuote.rawCost, firstQuote.avgPrice, rnd.negRisk);
       if (!firstFill) {
-        this.roundDecision = "first leg not filled";
-        this.status = "pair order failed";
+        this.roundDecision = "pair first leg not filled";
+        this.status = "single first leg not filled";
         this.hedgeState = "watching";
         this.allowNoExposureRetry();
         return;
@@ -1345,9 +1396,9 @@ export class Hedge15mEngine {
       const secondQuote = secondBook && secondShares >= MIN_SHARES ? this.quoteBuyShares(secondBook, secondShares) : null;
       if (!secondAsk || !secondQuote) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "second leg book missing, rolled back" : "second leg book missing, residual managed";
+        this.roundDecision = cleared ? "pair second leg book invalid, rolled back" : "pair second leg book invalid, residual managed";
         if (cleared) {
-          this.status = "pair failed, rolled back";
+          this.status = "waiting first-leg low";
           this.hedgeState = "watching";
         }
         return;
@@ -1358,10 +1409,10 @@ export class Hedge15mEngine {
       if (projectedCost > MAX_EXEC_PAIR_COST) {
         const cleared = await this.abortUnhedgedPosition(trader);
         this.roundDecision = cleared
-          ? `second leg too expensive ${projectedCost.toFixed(3)}, rolled back`
-          : `second leg too expensive ${projectedCost.toFixed(3)}, residual managed`;
+          ? `pair projected cost ${projectedCost.toFixed(3)}, rolled back`
+          : `pair projected cost ${projectedCost.toFixed(3)}, residual managed`;
         if (cleared) {
-          this.status = "pair failed, rolled back";
+          this.status = "waiting first-leg low";
           this.hedgeState = "watching";
         }
         return;
@@ -1370,9 +1421,9 @@ export class Hedge15mEngine {
       const secondFill = await this.executeBuyLeg(trader, secondToken, secondShares, secondQuote.rawCost, secondQuote.avgPrice, rnd.negRisk);
       if (!secondFill) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "second leg not filled, rolled back" : "second leg not filled, residual managed";
+        this.roundDecision = cleared ? "pair second leg not filled, rolled back" : "pair second leg not filled, residual managed";
         if (cleared) {
-          this.status = "pair failed, rolled back";
+          this.status = "waiting first-leg low";
           this.hedgeState = "watching";
         }
         return;
@@ -1399,9 +1450,9 @@ export class Hedge15mEngine {
       await this.flattenResidual(trader);
       if (this.matchedShares < MIN_SHARES) {
         const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "pair shares too small, rolled back" : "pair shares too small, residual managed";
+        this.roundDecision = cleared ? "pair second leg not filled, rolled back" : "pair second leg not filled, residual managed";
         if (cleared) {
-          this.status = "pair failed, rolled back";
+          this.status = "waiting first-leg low";
           this.hedgeState = "watching";
         }
         return;
@@ -1412,7 +1463,7 @@ export class Hedge15mEngine {
           ? `observed cost has no edge ${this.observedCost.toFixed(3)}, rolled back`
           : `observed cost has no edge ${this.observedCost.toFixed(3)}, residual managed`;
         if (cleared) {
-          this.status = "pair no edge, rolled back";
+          this.status = "waiting first-leg low";
           this.hedgeState = "watching";
         }
         return;
@@ -1461,8 +1512,8 @@ export class Hedge15mEngine {
       const token = this.getSideToken(rnd, quote.side);
       const fill = await this.executeBuyLeg(trader, token, quote.shares, quote.leg.rawCost, quote.leg.avgPrice, rnd.negRisk);
       if (!fill) {
-        this.status = "first leg not filled";
-        this.roundDecision = "first leg not filled, retry after cooldown";
+        this.status = "single first leg not filled";
+        this.roundDecision = "single first leg not filled, continue watching";
         this.hedgeState = "watching";
         this.allowSingleNoExposureRetry();
         return;
@@ -1505,7 +1556,7 @@ export class Hedge15mEngine {
       if (fill.filled < MIN_SHARES) {
         const cleared = await this.abortUnhedgedPosition(trader);
         if (cleared) {
-          this.status = "single shares too small, rolled back";
+          this.status = "single shares below minimum";
           this.roundDecision = this.status;
           this.hedgeState = "watching";
           this.allowSingleNoExposureRetry();
@@ -1517,8 +1568,7 @@ export class Hedge15mEngine {
       this.hedgeState = "single_open";
       this.activeStrategyMode = "staged-single";
       this.status = `single open ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)} shares @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)}`;
-      this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
+      this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} rebound target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-opened", {
@@ -1545,7 +1595,7 @@ export class Hedge15mEngine {
       this.roundDecision = this.status;
       this.singleRetryAfter = Date.now() + ENTRY_RETRY_COOLDOWN_MS;
     } else {
-      this.roundDecision = `single rollback incomplete ${reason}`;
+      this.roundDecision = `single rollback residual: ${reason}`;
     }
     this.persistRuntimeState();
   }
@@ -1695,38 +1745,35 @@ export class Hedge15mEngine {
       lowLockSwing >= SECOND_LEG_LOW_LOCK_MIN_SWING &&
       oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_LOW_LOCK_PAD &&
       lowAgeMs <= SECOND_LEG_LOW_LOCK_WINDOW_MS &&
-      (lowFlat || reboundedFromLow);
+      reboundedFromLow;
     this.signalCost = projectedCost;
-    const trendLabel = lockAfterFreshLow ? " low-lock" : lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
+    const trendLabel = lockAfterFreshLow ? " low-lock" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
     this.status = `single ${side.toUpperCase()} wait ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
     this.roundDecision = `second-leg low ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(activeHoldMs / 1000)}s`;
-
-    this.roundDecision = `???????${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(activeHoldMs / 1000)}s`;
     if (!canLock) {
       if (cutoffExpired || (timeExpired && secondLegPlan.quality === "normal")) {
-        await this.abortStagedSingle(trader, "hedge never reached lockable range");
+        await this.abortStagedSingle(trader, "second leg never entered lockable range");
       }
       return;
     }
     if (!withinPreferredEntry) {
       if (cutoffExpired || (timeExpired && secondLegPlan.quality === "normal")) {
-        await this.abortStagedSingle(trader, "second leg price never improved enough");
+        await this.abortStagedSingle(trader, "second leg price stayed too high");
       }
       return;
     }
-    if (!lowFlat && !reboundedFromLow && !lockAfterFreshLow && !(expired && nearHoldLow) ) {
+    if (!reboundedFromLow && !lockAfterFreshLow && !(expired && nearHoldLow) ) {
       return;
     }
 
     this.pairEntryInFlight = true;
     this.hedgeState = "pair_pending";
-    this.roundDecision = `hedging single position ${projectedCost.toFixed(3)}`;
+    this.roundDecision = `hedge second leg ${projectedCost.toFixed(3)}`;
     try {
       const secondToken = this.getSideToken(rnd, oppositeSide);
       const secondFill = await this.executeBuyLeg(trader, secondToken, heldShares, oppositeQuote.rawCost, preferredEntryCap, rnd.negRisk);
       if (!secondFill) {
-        this.hedgeState = "single_open";
-        this.roundDecision = "second leg not filled, keep waiting or abort";
+        this.roundDecision = "second leg not filled, keep waiting";
         if (expired) await this.abortStagedSingle(trader, "second leg not filled");
         return;
       }
@@ -1753,7 +1800,7 @@ export class Hedge15mEngine {
         this.roundDecision = cleared ? "hedged but no valid edge, rolled back" : "hedged but no valid edge, residual managed";
         if (cleared) {
           this.hedgeState = "watching";
-          this.status = "single hedge failed, rolled back";
+          this.status = "waiting first-leg low";
         }
         return;
       }
@@ -1763,8 +1810,8 @@ export class Hedge15mEngine {
       this.hedgeState = "pair_open";
       this.activeStrategyMode = "staged-single-hedged";
       this.entryReason = `STAGED cost=${this.observedCost.toFixed(3)} edge=${(this.lockedEdge * 100).toFixed(2)}%`;
-      this.status = `single hedged ${this.matchedShares.toFixed(0)} pairs @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `single low-price hedge complete edge ${(this.lockedEdge * 100).toFixed(2)}%`;
+      this.status = `staged hedge opened ${this.matchedShares.toFixed(0)} pairs @${this.observedCost.toFixed(3)}`;
+      this.roundDecision = `second leg locked edge ${(this.lockedEdge * 100).toFixed(2)}%`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-hedged", {
@@ -1838,8 +1885,8 @@ export class Hedge15mEngine {
       cumProfit: round2(this.totalProfit),
       exitType: "settlement",
       exitReason: this.matchedShares > 0
-        ? `settlement winner: ${winningLeg.toUpperCase()} | pair ${this.matchedShares.toFixed(0)} pairs`
-        : `settlement winner: ${winningLeg.toUpperCase()} | single ${primarySide?.toUpperCase() || "-"} ${primaryShares.toFixed(0)} shares`,
+        ? `settlement: ${winningLeg.toUpperCase()} | pair ${this.matchedShares.toFixed(0)} shares`
+        : `settlement: ${winningLeg.toUpperCase()} | single ${primarySide?.toUpperCase() || "-"} ${primaryShares.toFixed(0)} shares`,
       leg1Shares: primaryShares,
       leg1FillPrice: round2(primaryFillPrice),
       orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
@@ -1894,8 +1941,8 @@ export class Hedge15mEngine {
         if (!this.isActiveRun(runId)) break;
 
         if (!round) {
-          this.status = "no active 15m market, waiting";
-          this.roundDecision = "waiting for next market";
+          this.status = "no active 15m market";
+          this.roundDecision = "waiting for market";
           this.secondsLeft = 0;
           setRoundSecsLeft(999);
           if (this.trader) {
@@ -1934,11 +1981,10 @@ export class Hedge15mEngine {
             secondsLeft: round.secondsLeft,
             conditionId: round.conditionId,
           });
-
           if (this.balance < MIN_BALANCE_TO_TRADE) {
-            this.setRoundSkipped(`浣欓$${this.balance.toFixed(2)} < $${MIN_BALANCE_TO_TRADE}`);
+            this.setRoundSkipped(`balance $${this.balance.toFixed(2)} < $${MIN_BALANCE_TO_TRADE}`);
           } else if (round.secondsLeft <= MIN_ENTRY_SECS) {
-            this.setRoundSkipped(`鍓╀綑${Math.floor(round.secondsLeft)}s < ${MIN_ENTRY_SECS}s`);
+            this.setRoundSkipped(`only ${Math.floor(round.secondsLeft)}s left < ${MIN_ENTRY_SECS}s`);
           }
         }
 
@@ -1982,36 +2028,33 @@ export class Hedge15mEngine {
             : `watching pair spread: insufficient executable depth cost ${signalCost.toFixed(3)}`;
           this.roundDecision = `round low ${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / current ${signalCost.toFixed(3)} / observed ${observedSecs}s`;
 
-          this.status = pairQuote
-            ? `waiting first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
-            : `watching first-leg setup: insufficient depth cost ${signalCost.toFixed(3)}`;
-          if (upBook && downBook && this.isStagedSingleEnabled()) {
-            const { quotes: singleQuotes, reasons: singleBuildReasons } = this.buildStagedSingleQuotes(upBook, downBook);
-            for (const quote of singleQuotes) this.pushSingleCost(quote.side, quote.effectiveCost);
-            const singleEvaluations = singleQuotes.map((quote) => ({
-              quote,
-              check: this.evaluateStagedSingleEntry(quote, round.secondsLeft),
-            }));
-            const singleCandidate = singleEvaluations.find((item) => item.check.ok);
-            if (singleCandidate) {
-              await this.openStagedSingle(trader, round, singleCandidate.quote);
-            } else if (singleEvaluations.length > 0) {
-              const bestRejected = singleEvaluations[0];
-              this.roundDecision = `no trade: ${bestRejected.check.reason}`;
-              this.maybeAuditNoTrade(bestRejected.check.reason, {
-                side: bestRejected.quote.side,
-                effectiveCost: round2(bestRejected.quote.effectiveCost),
-                projectedPairCost: round2(bestRejected.quote.projectedPairCost),
-                oppositeAsk: round2(bestRejected.quote.opposite.avgPrice),
-              });
-            } else {
-              const buildReason = singleBuildReasons[0] || "insufficient depth or first leg too expensive";
-              this.roundDecision = `no trade: ${buildReason}`;
-              this.maybeAuditNoTrade(buildReason, {
-                upAsk: this.upAsk,
-                downAsk: this.downAsk,
-              });
-            }
+          const { quotes: singleQuotes, reasons: singleBuildReasons } = upBook && downBook
+            ? this.buildStagedSingleQuotes(upBook, downBook)
+            : { quotes: [], reasons: [] };
+          for (const quote of singleQuotes) this.pushSingleCost(quote.side, quote.effectiveCost);
+          const singleEvaluations = singleQuotes.map((quote) => ({
+            quote,
+            check: this.evaluateStagedSingleEntry(quote, round.secondsLeft),
+          }));
+          const singleCandidate = singleEvaluations.find((item) => item.check.ok);
+          if (singleCandidate) {
+            await this.openStagedSingle(trader, round, singleCandidate.quote);
+          } else if (singleEvaluations.length > 0) {
+            const bestRejected = singleEvaluations[0];
+            this.roundDecision = `no trade: ${bestRejected.check.reason}`;
+            this.maybeAuditNoTrade(bestRejected.check.reason, {
+              side: bestRejected.quote.side,
+              effectiveCost: round2(bestRejected.quote.effectiveCost),
+              projectedPairCost: round2(bestRejected.quote.projectedPairCost),
+              oppositeAsk: round2(bestRejected.quote.opposite.avgPrice),
+            });
+          } else {
+            const buildReason = singleBuildReasons[0] || "insufficient depth or first leg too expensive";
+            this.roundDecision = `no trade: ${buildReason}`;
+            this.maybeAuditNoTrade(buildReason, {
+              upAsk: this.upAsk,
+              downAsk: this.downAsk,
+            });
           }
         } else if (this.hedgeState === "watching") {
           const missingSide = this.upAsk <= 0 && this.downAsk <= 0
@@ -2034,7 +2077,7 @@ export class Hedge15mEngine {
         await trader.waitForOrderbookUpdate(trader.getOrderbookVersion(), LOOP_SLEEP_MS);
       } catch (error: any) {
         logger.error(`mainLoop error: ${error.message}`);
-        this.status = `閿欒: ${error.message}`;
+        this.status = `main loop error: ${error.message}`;
         this.roundDecision = "main loop error";
         await sleep(1000);
       }
@@ -2059,7 +2102,7 @@ export class Hedge15mEngine {
     this.running = true;
     this.loopRunId += 1;
     this.status = this.tradingMode === "paper" ? "paper ready" : "live ready";
-    this.roundDecision = "waiting for market";
+    this.roundDecision = "ready";
 
     await this.refreshBalance();
     if (this.initialBankroll <= 0) {
@@ -2075,7 +2118,7 @@ export class Hedge15mEngine {
     this.running = false;
     this.loopRunId += 1;
     this.status = "stopped";
-    this.roundDecision = "stopped by user";
+    this.roundDecision = "stopped";
     this.hedgeState = "off";
     this.persistRuntimeState();
     stopPriceFeed();
