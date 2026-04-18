@@ -228,6 +228,8 @@ tr:hover{background:rgba(118,183,255,.03)}
             <span>锁定Edge <b id="dump-signals" style="color:var(--text)">--</b></span>
             <span>第一腿份数 <b id="dump-mom-rej" style="color:var(--text)">--</b></span>
             <span>补腿最低/目标 <b id="dump-ask-rej" style="color:var(--text)">--</b></span>
+            <span>第一腿质量 <b id="dump-leg-quality" style="color:var(--text)">--</b></span>
+            <span>第二腿等待 <b id="dump-leg-wait" style="color:var(--text)">--</b></span>
           </div>
         </div>
       </div>
@@ -497,7 +499,7 @@ function render(s) {
   decEl.style.color = (s.roundDecision||'').includes('跳过')?'#ff6b6b':'#ecf3ff';
 
   // Position & Market
-  const stMap = {off:'待命',watching:'等第一腿',single_pending:'第一腿下单中',single_open:'等补第二腿',pair_pending:'补腿中',pair_open:'已锁利持仓',leg1_filled:'已锁利持仓',done:'完成'};
+  const stMap = {off:'待命',watching:'找第一腿',single_pending:'第一腿下单中',single_open:'等第二腿低点',pair_pending:'补腿中',pair_open:'已锁利持仓',leg1_filled:'已锁利持仓',done:'完成'};
   const stEl = document.getElementById('h-state');
   stEl.textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
   stEl.style.color = (s.status||'').includes('跳过')?'#f4c96b':'';
@@ -545,6 +547,11 @@ function render(s) {
     s.secondLegLowestPrice>0
       ? (s.secondLegLowestPrice.toFixed(3)+' / '+(s.secondLegTargetPrice>0?s.secondLegTargetPrice.toFixed(3):'--'))
       : (s.secondLegTargetPrice>0 ? ('-- / '+s.secondLegTargetPrice.toFixed(3)) : '--');
+  document.getElementById('dump-leg-quality').textContent = s.secondLegQuality ? String(s.secondLegQuality).toUpperCase() : '--';
+  document.getElementById('dump-leg-wait').textContent =
+    s.secondLegWaitMaxSecs > 0
+      ? (Math.floor(Number(s.secondLegWaitSecs || 0)) + 's / ' + Math.floor(Number(s.secondLegWaitMaxSecs || 0)) + 's')
+      : '--';
   if (s.hedgeState === 'single_open' && s.singleSide) {
     const side = String(s.singleSide).toUpperCase();
     const shares = Number(s.singleHeldShares || 0);
@@ -570,10 +577,10 @@ function render(s) {
   const prEl = document.getElementById('h-preorder');
   if (prEl) {
     prEl.textContent =
-      (s.hedgeState==='single_open') ? '补第二腿锁利' :
+      (s.hedgeState==='single_open') ? '等待第二腿低点' :
       (s.hedgeState==='single_pending') ? '第一腿FAK' :
       (s.hedgeState==='pair_pending') ? '第二腿FAK' :
-      (s.hedgeState==='watching') ? '等待恐慌低价' :
+      (s.hedgeState==='watching') ? '更早找第一腿' :
       '--';
     prEl.style.color='#8ea0b8';
   }
@@ -582,10 +589,10 @@ function render(s) {
   if (s.rtMinEntrySecs != null) {
     document.getElementById('p-kelly').textContent = '分腿锁利';
     document.getElementById('p-dual-ask').textContent = '≤$'+s.effectiveMaxAsk.toFixed(3);
-    document.getElementById('p-max-ask').textContent = '补腿≤公式上限';
+    document.getElementById('p-max-ask').textContent = '第二腿<=锁利上限';
     document.getElementById('p-edge-rule').textContent = '≥1.5%';
     document.getElementById('p-dump-confirm').textContent = s.pairBestObservedCost>0?s.pairBestObservedCost.toFixed(3):'--';
-    document.getElementById('p-window').textContent = '观察后且剩余>'+s.rtMinEntrySecs+'s';
+    document.getElementById('p-window').textContent = '约30s后可进第一腿, 剩余>'+s.rtMinEntrySecs+'s';
   }
 
   // Infra

@@ -32,7 +32,7 @@ const NEAR_LOW_TOLERANCE = 0.01;
 const SETTLEMENT_SAMPLE_DELAY_MS = 500;
 const HOT_BOOK_MAX_AGE_MS = 350;
 const ENTRY_RETRY_COOLDOWN_MS = 1_500;
-const MIN_OBSERVATION_MS = 60_000;
+const MIN_OBSERVATION_MS = 30_000;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
@@ -42,7 +42,7 @@ const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
 const SINGLE_MAX_HOLD_MS = 90_000;
-const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
+const SINGLE_NEAR_LOW_TOLERANCE = 0.015;
 const SINGLE_MIN_DROP_FROM_HIGH = 0.08;
 const SINGLE_MIN_DROP_PCT = 0.18;
 const SINGLE_LOW_REBOUND_CONFIRM = 0.01;
@@ -51,7 +51,7 @@ const FIRST_LEG_TREND_WINDOW = 5;
 const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
 const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
 const FIRST_LEG_FLAT_RANGE = 0.005;
-const FIRST_LEG_FLAT_NEAR_LOW = 0.01;
+const FIRST_LEG_FLAT_NEAR_LOW = 0.015;
 const FIRST_LEG_OPPOSITE_HEADROOM = 0.02;
 const BUY_REPRICE_TOLERANCE = 0.01;
 const SECOND_LEG_TARGET_DISCOUNT = 0.04;
@@ -70,7 +70,6 @@ const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
 const SINGLE_ESCAPE_LOSS_PER_SHARE = 0.035;
 const SINGLE_ESCAPE_LOSS_PCT = 0.14;
 const SINGLE_ESCAPE_BTC_MOVE_PCT = 0.001;
-const SINGLE_ESCAPE_STALE_MS = 45_000;
 const SINGLE_STOP_MAX_LOSS_PER_SHARE = SINGLE_ESCAPE_LOSS_PER_SHARE;
 const SINGLE_STOP_MAX_LOSS_PCT = SINGLE_ESCAPE_LOSS_PCT;
 const SINGLE_STOP_REBOUND_KEEP_PROFIT = 0.015;
@@ -172,6 +171,9 @@ export interface Hedge15mState {
   singleSide: string;
   singleHeldShares: number;
   singleEntryPrice: number;
+  secondLegQuality: string;
+  secondLegWaitSecs: number;
+  secondLegWaitMaxSecs: number;
   secondLegTargetPrice: number;
   secondLegMaxPrice: number;
   secondLegLowestPrice: number;
@@ -489,6 +491,11 @@ export class Hedge15mEngine {
       remaining -= take;
     }
     if (filled + 1e-9 < shares || rawCost <= 0) return null;
+    const singleEntryEffective = this.singleSide ? this.singleEntryEffectiveCost || this.observedCost : 0;
+    const secondLegPlan = singleEntryEffective > 0 ? this.buildSecondLegPlan(singleEntryEffective) : null;
+    const secondLegWaitSecs = this.singleSide && this.singleOpenedAt > 0
+      ? Math.max(0, Math.floor((Date.now() - this.singleOpenedAt) / 1000))
+      : 0;
     return {
       shares,
       rawCost,
@@ -583,8 +590,8 @@ export class Hedge15mEngine {
     if (firstEffectiveCost <= 0.18) {
       return {
         quality: "extreme",
-        holdMs: 150_000,
-        hedgeCutoffSecs: 45,
+        holdMs: 360_000,
+        hedgeCutoffSecs: 30,
         targetDiscount: SECOND_LEG_TARGET_DISCOUNT_EXTREME,
         entryPad: SECOND_LEG_ENTRY_PAD_EXTREME,
       };
@@ -592,16 +599,16 @@ export class Hedge15mEngine {
     if (firstEffectiveCost <= 0.24) {
       return {
         quality: "deep",
-        holdMs: 120_000,
-        hedgeCutoffSecs: 60,
+        holdMs: 300_000,
+        hedgeCutoffSecs: 45,
         targetDiscount: SECOND_LEG_TARGET_DISCOUNT_DEEP,
         entryPad: SECOND_LEG_ENTRY_PAD_DEEP,
       };
     }
     return {
       quality: "normal",
-      holdMs: SINGLE_MAX_HOLD_MS,
-      hedgeCutoffSecs: SINGLE_HEDGE_CUTOFF_SECS,
+      holdMs: 240_000,
+      hedgeCutoffSecs: 60,
       targetDiscount: SECOND_LEG_TARGET_DISCOUNT,
       entryPad: SECOND_LEG_ENTRY_PAD,
     };
@@ -1551,17 +1558,22 @@ export class Hedge15mEngine {
     const entryEffective = this.singleEntryEffectiveCost || this.getSideAvgFill(side) * (1 + TAKER_FEE);
     if (entryEffective <= 0) return null;
 
+    this.singleBestExitBid = Math.max(this.singleBestExitBid, bid);
     const heldAgeMs = this.singleOpenedAt > 0 ? Date.now() - this.singleOpenedAt : 0;
     const lossPerShare = entryEffective - exitEffective;
     const lossPct = lossPerShare / entryEffective;
     const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
+    const secondLegPlan = this.buildSecondLegPlan(entryEffective);
+    const bestExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
+    const recoveredPerShare = Math.max(0, bestExitEffective - entryEffective);
+    const extendedHoldMs = recoveredPerShare >= 0.01 ? Math.floor(secondLegPlan.holdMs * 1.5) : secondLegPlan.holdMs;
 
     if (lossPerShare >= SINGLE_ESCAPE_LOSS_PER_SHARE && lossPct >= SINGLE_ESCAPE_LOSS_PCT && adverseBtcMove >= SINGLE_ESCAPE_BTC_MOVE_PCT) {
-      return `閿欎环澶辨晥: 浜忔崯${lossPerShare.toFixed(3)}/浠? BTC鍙嶅悜${(adverseBtcMove * 100).toFixed(2)}%`;
+      return `single invalidated: loss ${lossPerShare.toFixed(3)}/share BTC ${(adverseBtcMove * 100).toFixed(2)}%`;
     }
 
-    if (heldAgeMs >= SINGLE_ESCAPE_STALE_MS && lossPerShare > 0 && adverseBtcMove > 0) {
-      return `鍗曡吙瓒呮椂涓旀柟鍚戜笉鍒? ${Math.floor(heldAgeMs / 1000)}s`;
+    if (heldAgeMs >= extendedHoldMs && lossPerShare > 0 && adverseBtcMove > 0) {
+      return `single stale and adverse ${Math.floor(heldAgeMs / 1000)}s`;
     }
 
     return null;
@@ -2032,6 +2044,11 @@ export class Hedge15mEngine {
     const secondsLeft = Math.max(0, this.secondsLeft);
     const roundElapsed = clamp(ROUND_DURATION - secondsLeft, 0, ROUND_DURATION);
     const lat = getLatencySnapshot();
+    const singleEntryEffective = this.singleSide ? this.singleEntryEffectiveCost || this.observedCost : 0;
+    const secondLegPlan = singleEntryEffective > 0 ? this.buildSecondLegPlan(singleEntryEffective) : null;
+    const secondLegWaitSecs = this.singleSide && this.singleOpenedAt > 0
+      ? Math.max(0, Math.floor((Date.now() - this.singleOpenedAt) / 1000))
+      : 0;
 
     return {
       botRunning: this.running,
@@ -2082,6 +2099,9 @@ export class Hedge15mEngine {
       singleSide: this.singleSide || "",
       singleHeldShares: this.singleSide ? this.getHeldShares(this.singleSide) : 0,
       singleEntryPrice: this.singleSide ? this.observedCost : 0,
+      secondLegQuality: secondLegPlan?.quality || "",
+      secondLegWaitSecs,
+      secondLegWaitMaxSecs: secondLegPlan ? Math.floor(secondLegPlan.holdMs / 1000) : 0,
       secondLegTargetPrice: this.secondLegTargetPrice,
       secondLegMaxPrice: this.secondLegMaxPrice,
       secondLegLowestPrice: Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice : 0,
