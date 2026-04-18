@@ -608,6 +608,13 @@ export class Hedge15mEngine {
     };
   }
 
+  private getSingleEntryMinSecs(firstEffectiveCost: number): number {
+    const plan = this.buildSecondLegPlan(firstEffectiveCost);
+    if (plan.quality === "extreme") return 120;
+    if (plan.quality === "deep") return 180;
+    return 300;
+  }
+
   private getExitBidForSide(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): number | null {
     const book = this.getSideBook(side, upBook, downBook);
     return book.bid != null && book.bid > 0 ? book.bid : null;
@@ -1215,7 +1222,6 @@ export class Hedge15mEngine {
 
   private evaluateStagedSingleEntry(quote: SingleLegQuote, secondsLeft: number): EntryCheck {
     if (!this.isStagedSingleEnabled()) return { ok: false, reason: "staged single disabled" };
-    if (secondsLeft <= SINGLE_ENTRY_MIN_SECS) return { ok: false, reason: `only ${Math.floor(secondsLeft)}s left` };
     if (this.singleAttemptedThisRound) return { ok: false, reason: "single already attempted" };
     if (Date.now() < this.singleRetryAfter) return { ok: false, reason: "single cooldown" };
     if (!this.hasEnoughRoundObservation(secondsLeft)) return { ok: false, reason: "observation too short" };
@@ -1229,10 +1235,11 @@ export class Hedge15mEngine {
       quote.effectiveCost <= sideLow + FIRST_LEG_DOWNTREND_LOW_PAD &&
       !trend.falling;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
+    const minSecsRequired = this.getSingleEntryMinSecs(quote.effectiveCost);
 
+    if (secondsLeft <= minSecsRequired) return { ok: false, reason: `only ${Math.floor(secondsLeft)}s left (<${minSecsRequired}s)` };
     if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} not near round low` };
     if (!lowFlat && !reboundedFromLow) return { ok: false, reason: `${quote.side.toUpperCase()} still falling` };
-    if (quote.projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) return { ok: false, reason: "second leg lock edge too small" };
     if (maxOther <= 0) return { ok: false, reason: "second leg cannot lock edge" };
 
     return { ok: true, reason: `first leg ${quote.side.toUpperCase()} allowed` };
