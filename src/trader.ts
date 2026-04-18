@@ -51,8 +51,6 @@ interface BestPriceSnapshot {
   updatedAt: number;
 }
 
-type BookSnapshotCore = Omit<BestPriceSnapshot, "updatedAt">;
-
 interface LocalOrderbook {
   bids: Map<number, number>;
   asks: Map<number, number>;
@@ -224,26 +222,6 @@ function cloneBookLevels(levels: BookLevel[] | undefined): BookLevel[] {
   return (levels || []).map((level) => ({ price: level.price, size: level.size }));
 }
 
-function mergeSparseSnapshot(previous: BestPriceSnapshot | undefined, next: BookSnapshotCore): BookSnapshotCore {
-  if (!previous) return next;
-  const mergedAskLevels = next.askLevels.length > 0 ? next.askLevels : cloneBookLevels(previous.askLevels);
-  const mergedBidLevels = next.bidLevels.length > 0 ? next.bidLevels : cloneBookLevels(previous.bidLevels);
-  const ask = next.ask != null ? next.ask : (mergedAskLevels.length > 0 ? mergedAskLevels[0].price : previous.ask);
-  const bid = next.bid != null ? next.bid : (mergedBidLevels.length > 0 ? mergedBidLevels[0].price : previous.bid);
-  const askDepth = next.askDepth > 0 ? next.askDepth : (mergedAskLevels.slice(0, 3).reduce((sum, level) => sum + level.size, 0) || previous.askDepth);
-  const bidDepth = next.bidDepth > 0 ? next.bidDepth : (mergedBidLevels.slice(0, 3).reduce((sum, level) => sum + level.size, 0) || previous.bidDepth);
-  const spread = ask != null && bid != null ? ask - bid : next.spread || previous.spread;
-  return {
-    bid,
-    ask,
-    spread,
-    askDepth,
-    bidDepth,
-    askLevels: mergedAskLevels,
-    bidLevels: mergedBidLevels,
-  };
-}
-
 function quoteBuyWithBudget(levels: BookLevel[], rawBudget: number): { filled: number; avgPrice: number; rawCost: number } {
   if (!Number.isFinite(rawBudget) || rawBudget <= 0) return { filled: 0, avgPrice: 0, rawCost: 0 };
   let remainingBudget = rawBudget;
@@ -317,7 +295,6 @@ export class Trader {
       this.paperOrders.clear();
       this.paperOrderSeq = 0;
       this.startOrderbookLoop();
-      this.startMarketSocket();
       logger.info(`交易客户端连接成功 (paper mode, initialBalance=$${this.paperBalance.toFixed(2)})`);
       return;
     }
@@ -412,8 +389,7 @@ export class Trader {
       if (refreshTargets.length > 0) {
         await Promise.allSettled(refreshTargets.map(async (tokenId) => {
           const snapshot = await this.fetchBestPrices(tokenId);
-          const merged = mergeSparseSnapshot(this.orderbookCache.get(tokenId), snapshot);
-          this.orderbookCache.set(tokenId, { ...merged, updatedAt: Date.now() });
+          this.orderbookCache.set(tokenId, { ...snapshot, updatedAt: Date.now() });
           updated = true;
         }));
       }
@@ -426,7 +402,7 @@ export class Trader {
   }
 
   private startMarketSocket(): void {
-    if (this.marketWs || !this.orderbookLoopActive) return;
+    if (this.mode !== "live" || this.marketWs || !this.orderbookLoopActive) return;
     try {
       const ws = new WebSocket(ORDERBOOK_WS_ENDPOINT);
       this.marketWs = ws;
@@ -460,7 +436,7 @@ export class Trader {
           clearInterval(this.marketWsPing);
           this.marketWsPing = null;
         }
-        if (this.orderbookLoopActive) {
+        if (this.mode === "live" && this.orderbookLoopActive) {
           setTimeout(() => this.startMarketSocket(), 1500);
         }
       });
@@ -471,7 +447,7 @@ export class Trader {
         }
       });
     } catch {
-      if (this.orderbookLoopActive) {
+      if (this.mode === "live" && this.orderbookLoopActive) {
         setTimeout(() => this.startMarketSocket(), 3000);
       }
     }
@@ -922,8 +898,7 @@ export class Trader {
     let updated = false;
     await Promise.allSettled(tokenIds.map(async (tokenId) => {
       const snapshot = await this.fetchBestPrices(tokenId);
-      const merged = mergeSparseSnapshot(this.orderbookCache.get(tokenId), snapshot);
-      this.orderbookCache.set(tokenId, { ...merged, updatedAt: Date.now() });
+      this.orderbookCache.set(tokenId, { ...snapshot, updatedAt: Date.now() });
       updated = true;
     }));
     if (updated) {
