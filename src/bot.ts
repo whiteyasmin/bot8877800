@@ -69,6 +69,8 @@ const SECOND_LEG_FLAT_RANGE = 0.005;
 const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
 const SECOND_LEG_LOW_LOCK_PAD = 0.004;
 const SECOND_LEG_LOW_LOCK_WINDOW_MS = 20_000;
+const SECOND_LEG_LOW_LOCK_MIN_SWING = 0.015;
+const SECOND_LEG_LOW_LOCK_MIN_EDGE = MIN_LOCKED_EDGE + 0.01;
 const SINGLE_ESCAPE_LOSS_PER_SHARE = 0.035;
 const SINGLE_ESCAPE_LOSS_PCT = 0.14;
 const SINGLE_ESCAPE_BTC_MOVE_PCT = 0.001;
@@ -1652,6 +1654,9 @@ export class Hedge15mEngine {
       : this.getMaxRawOtherPriceForLockedEdge(firstEffectiveCost);
     this.pushSecondLegPrice(oppositeQuote.avgPrice);
     const flat = this.getSecondLegFlatSignal();
+    const recentHigh = this.secondLegRecentPrices.length > 0
+      ? Math.max(...this.secondLegRecentPrices.map((item) => item.price))
+      : oppositeQuote.avgPrice;
     if (oppositeQuote.avgPrice < this.secondLegLowestPrice) {
       this.secondLegLowestPrice = oppositeQuote.avgPrice;
       this.secondLegLowestAt = Date.now();
@@ -1680,12 +1685,15 @@ export class Hedge15mEngine {
       oppositeQuote.avgPrice <= maxOther;
     const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
     const withinPreferredEntry = oppositeQuote.avgPrice <= preferredEntryCap;
+    const lowLockSwing = Math.max(0, recentHigh - this.secondLegLowestPrice);
     const lockAfterFreshLow = canLock &&
       withinPreferredEntry &&
+      projectedEdge >= SECOND_LEG_LOW_LOCK_MIN_EDGE &&
       Number.isFinite(this.secondLegLowestPrice) &&
+      lowLockSwing >= SECOND_LEG_LOW_LOCK_MIN_SWING &&
       oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_LOW_LOCK_PAD &&
       lowAgeMs <= SECOND_LEG_LOW_LOCK_WINDOW_MS &&
-      (lowFlat || reboundedFromLow || heldAgeMs >= Math.floor(activeHoldMs * 0.4));
+      (lowFlat || reboundedFromLow);
     this.signalCost = projectedCost;
     const trendLabel = lockAfterFreshLow ? " low-lock" : lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
     this.status = `鍗曡竟${side.toUpperCase()}绛夎ˉ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
