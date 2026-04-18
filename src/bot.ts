@@ -38,7 +38,6 @@ const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
 const SINGLE_PROFIT_REINVEST_PCT = 0.35;
 const SINGLE_MAX_SHARES = 60;
-const SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST = 1.04;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
@@ -659,10 +658,6 @@ export class Hedge15mEngine {
 
       const effectiveCost = legTotalCost / shares;
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
-      if (projectedPairCost > SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST) {
-        bestFailureReason = `${side.toUpperCase()} projected pair cost too high`;
-        continue;
-      }
 
       const quote: SingleLegQuote = {
         side,
