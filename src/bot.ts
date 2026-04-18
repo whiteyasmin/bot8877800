@@ -38,7 +38,6 @@ const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
 const SINGLE_PROFIT_REINVEST_PCT = 0.35;
 const SINGLE_MAX_SHARES = 60;
-const SINGLE_MAX_EFFECTIVE_COST = 0.30;
 const SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST = 1.04;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
@@ -65,6 +64,8 @@ const SECOND_LEG_TREND_WINDOW = 5;
 const SECOND_LEG_ENTRY_PAD = 0.01;
 const SECOND_LEG_ENTRY_PAD_DEEP = 0.02;
 const SECOND_LEG_ENTRY_PAD_EXTREME = 0.04;
+const SECOND_LEG_DYNAMIC_TARGET_PAD = 0.003;
+const SECOND_LEG_DYNAMIC_ENTRY_PAD = 0.008;
 const SECOND_LEG_FLAT_RANGE = 0.005;
 const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
 const SINGLE_ESCAPE_LOSS_PER_SHARE = 0.035;
@@ -651,10 +652,6 @@ export class Hedge15mEngine {
 
       const effectiveCost = legTotalCost / shares;
       const projectedPairCost = this.quotePairCost(legTotalCost, oppositeQuote.rawCost, shares);
-      if (effectiveCost > SINGLE_MAX_EFFECTIVE_COST) {
-        bestFailureReason = `${side.toUpperCase()} first leg too expensive`;
-        continue;
-      }
       if (projectedPairCost > SINGLE_CANDIDATE_MAX_PROJECTED_PAIR_COST) {
         bestFailureReason = `${side.toUpperCase()} projected pair cost too high`;
         continue;
@@ -1225,10 +1222,16 @@ export class Hedge15mEngine {
 
     const sideLow = this.roundLowestSideCost[quote.side];
     const nearRoundLow = Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + SINGLE_NEAR_LOW_TOLERANCE;
+    const trend = this.getSideCostTrend(quote.side);
+    const lowFlat = trend.flat && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_FLAT_NEAR_LOW;
+    const reboundedFromLow = Number.isFinite(sideLow) &&
+      quote.effectiveCost >= sideLow + 0.002 &&
+      quote.effectiveCost <= sideLow + FIRST_LEG_DOWNTREND_LOW_PAD &&
+      !trend.falling;
     const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
 
     if (!nearRoundLow) return { ok: false, reason: `${quote.side.toUpperCase()} not near round low` };
-    if (quote.effectiveCost > SINGLE_MAX_EFFECTIVE_COST) return { ok: false, reason: `${quote.side.toUpperCase()} first leg too expensive` };
+    if (!lowFlat && !reboundedFromLow) return { ok: false, reason: `${quote.side.toUpperCase()} still falling` };
     if (quote.projectedPairCost > SINGLE_MAX_PROJECTED_PAIR_COST) return { ok: false, reason: "second leg lock edge too small" };
     if (maxOther <= 0) return { ok: false, reason: "second leg cannot lock edge" };
 
@@ -1606,16 +1609,23 @@ export class Hedge15mEngine {
     const maxOther = this.secondLegMaxPrice > 0
       ? this.secondLegMaxPrice
       : this.getMaxRawOtherPriceForLockedEdge(firstEffectiveCost);
-    const targetOther = this.secondLegTargetPrice > 0
-      ? this.secondLegTargetPrice
-      : Math.max(0.01, maxOther - secondLegPlan.targetDiscount);
-    const preferredEntryCap = Math.min(maxOther, targetOther + secondLegPlan.entryPad);
     this.pushSecondLegPrice(oppositeQuote.avgPrice);
     const flat = this.getSecondLegFlatSignal();
     if (oppositeQuote.avgPrice < this.secondLegLowestPrice) {
       this.secondLegLowestPrice = oppositeQuote.avgPrice;
       this.secondLegLowestAt = Date.now();
     }
+    const dynamicLowTarget = Number.isFinite(this.secondLegLowestPrice)
+      ? this.secondLegLowestPrice + SECOND_LEG_DYNAMIC_TARGET_PAD
+      : Math.max(0.01, maxOther - secondLegPlan.targetDiscount);
+    const targetOther = Math.min(maxOther, dynamicLowTarget);
+    const preferredEntryCap = Math.min(
+      maxOther,
+      Number.isFinite(this.secondLegLowestPrice)
+        ? this.secondLegLowestPrice + SECOND_LEG_DYNAMIC_ENTRY_PAD
+        : targetOther + secondLegPlan.entryPad,
+    );
+    this.secondLegTargetPrice = targetOther;
     const nearHoldLow = Number.isFinite(this.secondLegLowestPrice) &&
       oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_NEAR_LOW_TOLERANCE;
     const reboundedFromLow = Number.isFinite(this.secondLegLowestPrice) &&
