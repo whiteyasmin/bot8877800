@@ -67,6 +67,8 @@ const SECOND_LEG_DYNAMIC_TARGET_PAD = 0.003;
 const SECOND_LEG_DYNAMIC_ENTRY_PAD = 0.008;
 const SECOND_LEG_FLAT_RANGE = 0.005;
 const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
+const SECOND_LEG_LOW_LOCK_PAD = 0.004;
+const SECOND_LEG_LOW_LOCK_WINDOW_MS = 20_000;
 const SINGLE_ESCAPE_LOSS_PER_SHARE = 0.035;
 const SINGLE_ESCAPE_LOSS_PCT = 0.14;
 const SINGLE_ESCAPE_BTC_MOVE_PCT = 0.001;
@@ -496,6 +498,7 @@ export class Hedge15mEngine {
     const secondLegWaitSecs = this.singleSide && this.singleOpenedAt > 0
       ? Math.max(0, Math.floor((Date.now() - this.singleOpenedAt) / 1000))
       : 0;
+    const secondLegWaitMaxSecs = secondLegPlan ? Math.floor(this.getSecondLegActiveHoldMs(secondLegPlan) / 1000) : 0;
     return {
       shares,
       rawCost,
@@ -612,6 +615,12 @@ export class Hedge15mEngine {
       targetDiscount: SECOND_LEG_TARGET_DISCOUNT,
       entryPad: SECOND_LEG_ENTRY_PAD,
     };
+  }
+
+  private getSecondLegActiveHoldMs(plan: SingleSecondLegPlan): number {
+    if (plan.quality === "extreme") return Math.floor(plan.holdMs * 2);
+    if (plan.quality === "deep") return Math.floor(plan.holdMs * 1.5);
+    return plan.holdMs;
   }
 
   private getSingleEntryMinSecs(firstEffectiveCost: number): number {
@@ -1580,7 +1589,8 @@ export class Hedge15mEngine {
     const secondLegPlan = this.buildSecondLegPlan(entryEffective);
     const bestExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
     const recoveredPerShare = Math.max(0, bestExitEffective - entryEffective);
-    const extendedHoldMs = recoveredPerShare >= 0.01 ? Math.floor(secondLegPlan.holdMs * 1.5) : secondLegPlan.holdMs;
+    const baseHoldMs = this.getSecondLegActiveHoldMs(secondLegPlan);
+    const extendedHoldMs = recoveredPerShare >= 0.01 ? Math.floor(baseHoldMs * 1.5) : baseHoldMs;
 
     if (lossPerShare >= SINGLE_ESCAPE_LOSS_PER_SHARE && lossPct >= SINGLE_ESCAPE_LOSS_PCT && adverseBtcMove >= SINGLE_ESCAPE_BTC_MOVE_PCT) {
       return `single invalidated: loss ${lossPerShare.toFixed(3)}/share BTC ${(adverseBtcMove * 100).toFixed(2)}%`;
@@ -1624,7 +1634,10 @@ export class Hedge15mEngine {
     const oppositeQuote = this.quoteBuyShares(oppositeBook, heldShares);
     const heldAgeMs = this.singleOpenedAt > 0 ? Date.now() - this.singleOpenedAt : 0;
     const secondLegPlan = this.buildSecondLegPlan(this.singleEntryEffectiveCost || (heldShares > 0 ? this.totalCost / heldShares : Number.POSITIVE_INFINITY));
-    const expired = heldAgeMs >= secondLegPlan.holdMs || rnd.secondsLeft <= secondLegPlan.hedgeCutoffSecs;
+    const activeHoldMs = this.getSecondLegActiveHoldMs(secondLegPlan);
+    const timeExpired = heldAgeMs >= activeHoldMs;
+    const cutoffExpired = rnd.secondsLeft <= secondLegPlan.hedgeCutoffSecs;
+    const expired = timeExpired || cutoffExpired;
     if (!oppositeQuote) {
       this.status = `single ${side.toUpperCase()} waiting hedge: insufficient book depth`;
       if (expired) await this.abortStagedSingle(trader, "hedge wait timeout");
@@ -1643,6 +1656,7 @@ export class Hedge15mEngine {
       this.secondLegLowestPrice = oppositeQuote.avgPrice;
       this.secondLegLowestAt = Date.now();
     }
+    const lowAgeMs = this.secondLegLowestAt > 0 ? Date.now() - this.secondLegLowestAt : Number.POSITIVE_INFINITY;
     const dynamicLowTarget = Number.isFinite(this.secondLegLowestPrice)
       ? this.secondLegLowestPrice + SECOND_LEG_DYNAMIC_TARGET_PAD
       : Math.max(0.01, maxOther - secondLegPlan.targetDiscount);
@@ -1666,21 +1680,31 @@ export class Hedge15mEngine {
       oppositeQuote.avgPrice <= maxOther;
     const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
     const withinPreferredEntry = oppositeQuote.avgPrice <= preferredEntryCap;
+    const lockAfterFreshLow = canLock &&
+      withinPreferredEntry &&
+      Number.isFinite(this.secondLegLowestPrice) &&
+      oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_LOW_LOCK_PAD &&
+      lowAgeMs <= SECOND_LEG_LOW_LOCK_WINDOW_MS &&
+      (lowFlat || reboundedFromLow || heldAgeMs >= Math.floor(activeHoldMs * 0.4));
     this.signalCost = projectedCost;
-    const trendLabel = lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
+    const trendLabel = lockAfterFreshLow ? " low-lock" : lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
     this.status = `鍗曡竟${side.toUpperCase()}绛夎ˉ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
     this.roundDecision = `琛ヨ吙浣?${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} range ${flat.range.toFixed(3)} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
 
-    this.roundDecision = `琛ヨ吙浣?${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
+    this.roundDecision = `???????${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(activeHoldMs / 1000)}s`;
     if (!canLock) {
-      if (expired) await this.abortStagedSingle(trader, "鏈瓑鍒板彲閿佸埄瀵瑰啿");
+      if (cutoffExpired || (timeExpired && secondLegPlan.quality === "normal")) {
+        await this.abortStagedSingle(trader, "hedge never reached lockable range");
+      }
       return;
     }
     if (!withinPreferredEntry) {
-      if (expired) await this.abortStagedSingle(trader, "second leg price never improved enough");
+      if (cutoffExpired || (timeExpired && secondLegPlan.quality === "normal")) {
+        await this.abortStagedSingle(trader, "second leg price never improved enough");
+      }
       return;
     }
-    if (!hitTarget && !lowFlat && !reboundedFromLow && !(expired && nearHoldLow) ) {
+    if (!hitTarget && !lowFlat && !reboundedFromLow && !lockAfterFreshLow && !(expired && nearHoldLow) ) {
       return;
     }
 
@@ -2063,6 +2087,7 @@ export class Hedge15mEngine {
     const secondLegWaitSecs = this.singleSide && this.singleOpenedAt > 0
       ? Math.max(0, Math.floor((Date.now() - this.singleOpenedAt) / 1000))
       : 0;
+    const secondLegWaitMaxSecs = secondLegPlan ? Math.floor(this.getSecondLegActiveHoldMs(secondLegPlan) / 1000) : 0;
 
     return {
       botRunning: this.running,
@@ -2115,7 +2140,7 @@ export class Hedge15mEngine {
       singleEntryPrice: this.singleSide ? this.observedCost : 0,
       secondLegQuality: secondLegPlan?.quality || "",
       secondLegWaitSecs,
-      secondLegWaitMaxSecs: secondLegPlan ? Math.floor(secondLegPlan.holdMs / 1000) : 0,
+      secondLegWaitMaxSecs,
       secondLegTargetPrice: this.secondLegTargetPrice,
       secondLegMaxPrice: this.secondLegMaxPrice,
       secondLegLowestPrice: Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice : 0,
