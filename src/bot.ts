@@ -26,7 +26,7 @@ const TAKER_FEE = 0.02;
 const SIGNAL_SLIPPAGE_BUFFER = 0.01;
 const MAX_SIGNAL_PAIR_COST = 0.985;
 const MAX_EXEC_PAIR_COST = 0.995;
-const MIN_LOCKED_EDGE = 0.015;
+const MIN_LOCKED_EDGE = 0.04;
 const LOWEST_COST_LOOKBACK_MS = 45_000;
 const NEAR_LOW_TOLERANCE = 0.01;
 const SETTLEMENT_SAMPLE_DELAY_MS = 500;
@@ -38,6 +38,7 @@ const SINGLE_BUDGET_PCT = 0.12;
 const SINGLE_BUDGET_PCT_CAP = 0.2;
 const SINGLE_PROFIT_REINVEST_PCT = 0.35;
 const SINGLE_MAX_SHARES = 60;
+const FIRST_LEG_MAX_ENTRY = 0.20;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
@@ -54,22 +55,22 @@ const FIRST_LEG_FLAT_RANGE = 0.005;
 const FIRST_LEG_FLAT_NEAR_LOW = 0.015;
 const FIRST_LEG_OPPOSITE_HEADROOM = 0.02;
 const BUY_REPRICE_TOLERANCE = 0.01;
-const SECOND_LEG_TARGET_DISCOUNT = 0.04;
-const SECOND_LEG_TARGET_DISCOUNT_DEEP = 0.06;
-const SECOND_LEG_TARGET_DISCOUNT_EXTREME = 0.08;
-const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.01;
+const SECOND_LEG_TARGET_DISCOUNT = 0.06;
+const SECOND_LEG_TARGET_DISCOUNT_DEEP = 0.08;
+const SECOND_LEG_TARGET_DISCOUNT_EXTREME = 0.10;
+const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.006;
 const SECOND_LEG_REBOUND_FROM_LOW = 0.02;
 const SECOND_LEG_TREND_WINDOW = 5;
-const SECOND_LEG_ENTRY_PAD = 0.01;
-const SECOND_LEG_ENTRY_PAD_DEEP = 0.02;
-const SECOND_LEG_ENTRY_PAD_EXTREME = 0.04;
-const SECOND_LEG_DYNAMIC_TARGET_PAD = 0.003;
-const SECOND_LEG_DYNAMIC_ENTRY_PAD = 0.008;
+const SECOND_LEG_ENTRY_PAD = 0.008;
+const SECOND_LEG_ENTRY_PAD_DEEP = 0.015;
+const SECOND_LEG_ENTRY_PAD_EXTREME = 0.025;
+const SECOND_LEG_DYNAMIC_TARGET_PAD = 0.002;
+const SECOND_LEG_DYNAMIC_ENTRY_PAD = 0.003;
 const SECOND_LEG_FLAT_RANGE = 0.005;
-const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
-const SECOND_LEG_LOW_LOCK_PAD = 0.004;
-const SECOND_LEG_LOW_LOCK_WINDOW_MS = 20_000;
-const SECOND_LEG_LOW_LOCK_MIN_SWING = 0.015;
+const SECOND_LEG_FLAT_NEAR_LOW = 0.006;
+const SECOND_LEG_LOW_LOCK_PAD = 0.003;
+const SECOND_LEG_LOW_LOCK_WINDOW_MS = 15_000;
+const SECOND_LEG_LOW_LOCK_MIN_SWING = 0.025;
 const SECOND_LEG_LOW_LOCK_MIN_EDGE = MIN_LOCKED_EDGE + 0.01;
 const SINGLE_ESCAPE_LOSS_PER_SHARE = 0.035;
 const SINGLE_ESCAPE_LOSS_PCT = 0.14;
@@ -325,7 +326,7 @@ export class Hedge15mEngine {
   private loopRunId = 0;
 
   private status = "绌洪棽";
-  private roundDecision = "绛夊緟甯傚満";
+  private roundDecision = "waiting for market";
   private balance = 0;
   private initialBankroll = 0;
   private totalProfit = 0;
@@ -633,14 +634,15 @@ export class Hedge15mEngine {
   }
 
   private getFirstLegQualityReason(effectiveCost: number, sideLow: number): string | null {
+    if (effectiveCost > FIRST_LEG_MAX_ENTRY) return `first leg above ${FIRST_LEG_MAX_ENTRY.toFixed(2)}`;
     const distanceToMid = 0.5 - effectiveCost;
-    if (distanceToMid <= 0.015) return "first leg too close to 0.5";
-    if (effectiveCost >= 0.46) return "first leg quality too weak";
+    if (distanceToMid <= 0.04) return "first leg too close to 0.5";
+    if (effectiveCost >= 0.42) return "first leg quality too weak";
     if (!Number.isFinite(sideLow)) return null;
 
     const reboundFromLow = effectiveCost - sideLow;
-    if (effectiveCost >= 0.42 && reboundFromLow > 0.008) return "first leg bounced too far off low";
-    if (effectiveCost >= 0.36 && reboundFromLow > 0.012) return "first leg bounced too far off low";
+    if (effectiveCost >= 0.38 && reboundFromLow > 0.006) return "first leg bounced too far off low";
+    if (effectiveCost >= 0.30 && reboundFromLow > 0.01) return "first leg bounced too far off low";
     return null;
   }
 
@@ -942,7 +944,7 @@ export class Hedge15mEngine {
       leg1FillPrice: round2(fillPrice),
       orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
       estimated: false,
-      profitBreakdown: `閸ョ偞鏁?${recoveredValue.toFixed(2)} - 閹存劖婀?${grossCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      profitBreakdown: `recovered $${recoveredValue.toFixed(2)} - cost $${grossCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}` ,
       entrySource: this.activeStrategyMode,
       pairMatchedShares: 0,
       upFilledShares: this.upHeldShares,
@@ -959,9 +961,9 @@ export class Hedge15mEngine {
 
   private resetRoundState(): void {
     this.hedgeState = "watching";
-    this.status = "鐩戞帶鍙岃竟鐮哥洏閿欎环";
+    this.status = "watch first-leg low";
     this.roundDecision = "wait for UP/DN near lows";
-    this.status = "绛夊緟鍗曡吙鎭愭厡浣庝环";
+    this.status = "waiting first-leg low";
     this.roundDecision = "take low first leg then wait second leg to lock edge";
     this.activeStrategyMode = "staged-single";
     this.pairAttemptedThisRound = false;
@@ -1306,7 +1308,7 @@ export class Hedge15mEngine {
     this.pairAttemptedThisRound = true;
     this.hedgeState = "pair_pending";
     this.status = `pair order pending ${targetShares} pairs`;
-    this.roundDecision = `鍑嗗閰嶅鎴愭湰 ${pairQuote.signalCost.toFixed(3)} VWAP ${pairQuote.rawCostPerPair.toFixed(3)} 棰勬湡+$${pairQuote.expectedProfit.toFixed(2)}`;
+    this.roundDecision = `prepare pair cost ${pairQuote.signalCost.toFixed(3)} VWAP ${pairQuote.rawCostPerPair.toFixed(3)} expected +$${pairQuote.expectedProfit.toFixed(2)}`;
 
     try {
       const firstSide: PairLegSide = pairQuote.up.depth <= pairQuote.down.depth ? "up" : "down";
@@ -1317,8 +1319,8 @@ export class Hedge15mEngine {
 
       const firstFill = await this.executeBuyLeg(trader, firstToken, targetShares, firstQuote.rawCost, firstQuote.avgPrice, rnd.negRisk);
       if (!firstFill) {
-        this.roundDecision = "绗竴鑵挎湭鎴愪氦";
-        this.status = "鍙岃吙涓嬪崟澶辫触";
+        this.roundDecision = "first leg not filled";
+        this.status = "pair order failed";
         this.hedgeState = "watching";
         this.allowNoExposureRetry();
         return;
@@ -1516,7 +1518,7 @@ export class Hedge15mEngine {
       this.activeStrategyMode = "staged-single";
       this.status = `single open ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)} shares @${this.observedCost.toFixed(3)}`;
       this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)}`;
-      this.roundDecision = `绛夊緟琛?{this.getOppositeSide(quote.side).toUpperCase()} target鈮?{targetOther.toFixed(3)} max鈮?{filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
+      this.roundDecision = `wait ${this.getOppositeSide(quote.side).toUpperCase()} target<=${targetOther.toFixed(3)} max<=${filledMaxOther.toFixed(3)} ${secondLegPlan.quality}/${Math.floor(secondLegPlan.holdMs / 1000)}s`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-opened", {
@@ -1559,7 +1561,7 @@ export class Hedge15mEngine {
     const lossPerShare = entryEffective - exitEffective;
     const lossPct = lossPerShare / entryEffective;
     if (lossPerShare >= SINGLE_STOP_MAX_LOSS_PER_SHARE && lossPct >= SINGLE_STOP_MAX_LOSS_PCT) {
-      return `鍗曡竟姝㈡崯: 浜?{lossPerShare.toFixed(3)}/浠?(${(lossPct * 100).toFixed(1)}%)`;
+      return `single stop: loss ${lossPerShare.toFixed(3)}/share (${(lossPct * 100).toFixed(1)}%)`;
     }
 
     const bestExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
@@ -1570,7 +1572,7 @@ export class Hedge15mEngine {
 
     const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
     if (adverseBtcMove >= SINGLE_STOP_BTC_MOVE_PCT && lossPerShare > 0) {
-      return `鍗曡竟姝㈡崯: BTC鍙嶅悜${(adverseBtcMove * 100).toFixed(2)}%`;
+      return `single stop: BTC adverse ${(adverseBtcMove * 100).toFixed(2)}%`;
     }
 
     return null;
@@ -1617,7 +1619,7 @@ export class Hedge15mEngine {
     const oppositeSide = this.getOppositeSide(side);
     const heldShares = Math.floor(this.getHeldShares(side));
     if (heldShares < MIN_SHARES) {
-      await this.abortStagedSingle(trader, "鎸佷粨浠介涓嶈冻");
+      await this.abortStagedSingle(trader, "single shares below minimum");
       return;
     }
 
@@ -1696,8 +1698,8 @@ export class Hedge15mEngine {
       (lowFlat || reboundedFromLow);
     this.signalCost = projectedCost;
     const trendLabel = lockAfterFreshLow ? " low-lock" : lowFlat ? " flat-low" : reboundedFromLow ? " rebound" : nearHoldLow ? " near-low" : "";
-    this.status = `鍗曡竟${side.toUpperCase()}绛夎ˉ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
-    this.roundDecision = `琛ヨ吙浣?${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} range ${flat.range.toFixed(3)} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}%`;
+    this.status = `single ${side.toUpperCase()} wait ${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
+    this.roundDecision = `second-leg low ${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(activeHoldMs / 1000)}s`;
 
     this.roundDecision = `???????${Number.isFinite(this.secondLegLowestPrice) ? this.secondLegLowestPrice.toFixed(3) : "--"} / pair ${projectedCost.toFixed(3)} edge ${(projectedEdge * 100).toFixed(2)}% / ${secondLegPlan.quality}/${Math.floor(activeHoldMs / 1000)}s`;
     if (!canLock) {
@@ -1712,7 +1714,7 @@ export class Hedge15mEngine {
       }
       return;
     }
-    if (!hitTarget && !lowFlat && !reboundedFromLow && !lockAfterFreshLow && !(expired && nearHoldLow) ) {
+    if (!lowFlat && !reboundedFromLow && !lockAfterFreshLow && !(expired && nearHoldLow) ) {
       return;
     }
 
@@ -1842,7 +1844,7 @@ export class Hedge15mEngine {
       leg1FillPrice: round2(primaryFillPrice),
       orderId: [this.upOrderId, this.downOrderId].filter(Boolean).join("/"),
       estimated: false,
-      profitBreakdown: `鍥炴敹$${returnVal.toFixed(2)} - 鎴愭湰$${this.totalCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      profitBreakdown: `return $${returnVal.toFixed(2)} - cost $${this.totalCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}` ,
       entrySource: this.activeStrategyMode,
       entryTrendBias: "flat",
       entrySecondsLeft: Math.floor(this.secondsLeft),
@@ -1978,7 +1980,7 @@ export class Hedge15mEngine {
           this.status = pairQuote
             ? `watch first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
             : `watching pair spread: insufficient executable depth cost ${signalCost.toFixed(3)}`;
-          this.roundDecision = `鏈眬浣?${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / 褰撳墠 ${signalCost.toFixed(3)} / 瑙傚療${observedSecs}s`;
+          this.roundDecision = `round low ${Number.isFinite(this.roundLowestPairCost) ? this.roundLowestPairCost.toFixed(3) : "--"} / current ${signalCost.toFixed(3)} / observed ${observedSecs}s`;
 
           this.status = pairQuote
             ? `waiting first-leg low: pair ${signalCost.toFixed(3)} edge ${(lockedEdge * 100).toFixed(2)}%`
@@ -2057,7 +2059,7 @@ export class Hedge15mEngine {
     this.running = true;
     this.loopRunId += 1;
     this.status = this.tradingMode === "paper" ? "paper ready" : "live ready";
-    this.roundDecision = "绛夊緟甯傚満";
+    this.roundDecision = "waiting for market";
 
     await this.refreshBalance();
     if (this.initialBankroll <= 0) {
@@ -2073,7 +2075,7 @@ export class Hedge15mEngine {
     this.running = false;
     this.loopRunId += 1;
     this.status = "stopped";
-    this.roundDecision = "鎵嬪姩鍋滄";
+    this.roundDecision = "stopped by user";
     this.hedgeState = "off";
     this.persistRuntimeState();
     stopPriceFeed();

@@ -590,7 +590,7 @@ function render(s) {
     document.getElementById('p-kelly').textContent = '分腿锁利';
     document.getElementById('p-dual-ask').textContent = '≤$'+s.effectiveMaxAsk.toFixed(3);
     document.getElementById('p-max-ask').textContent = '第二腿<=锁利上限';
-    document.getElementById('p-edge-rule').textContent = '≥1.5%';
+    document.getElementById('p-edge-rule').textContent = '≥4.0%';
     document.getElementById('p-dump-confirm').textContent = s.pairBestObservedCost>0?s.pairBestObservedCost.toFixed(3):'--';
     document.getElementById('p-window').textContent = '约30s后可进第一腿, 剩余>'+s.rtMinEntrySecs+'s';
   }
