@@ -155,7 +155,7 @@ tr:hover{background:rgba(118,183,255,.03)}
 <div id="login-overlay">
   <div class="login-box">
     <h2>Vortex-15m</h2>
-    <p class="login-sub">BTC 15分钟趋势盘 · 双腿套利 + 极端低价反弹</p>
+    <p class="login-sub">BTC 15分钟趋势盘 · 极端低价反弹</p>
     <label>密码</label>
     <input type="password" id="pwd" autocomplete="current-password">
     <div style="margin-top:14px"><button class="btn-g" onclick="doLogin()" style="width:100%">登录</button></div>
@@ -275,7 +275,7 @@ tr:hover{background:rgba(118,183,255,.03)}
             <label>仿真余额</label>
             <input type="number" id="cfg-paper-balance" placeholder="100" value="100" min="10" step="10">
           </div>
-          <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成（双腿套利 + 极端低价反弹）</div>
+          <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成（极端低价反弹）</div>
           <div>
             <label>资金地址</label>
             <input type="text" id="cfg-fa" placeholder="0x..." autocomplete="off">
@@ -291,9 +291,9 @@ tr:hover{background:rgba(118,183,255,.03)}
       <div class="card c6">
         <h3>运行摘要</h3>
         <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px" id="params-bar">
-          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">双腿套利 / 极端反弹</b></span>
-          <span style="color:var(--muted)">双腿成本上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">单边入场上限 <b id="p-max-ask" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">极端低价反弹</b></span>
+          <span style="color:var(--muted)">入场成本上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">BTC 局内过滤 <b id="p-max-ask" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">反弹止盈启动 <b id="p-edge-rule" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">低点确认 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">开仓窗口 <b id="p-window" style="color:var(--text)">--</b></span>
@@ -423,10 +423,12 @@ function renderDirectionalAudit(history) {
   const trades = (history || []).filter(h => (h.exitType || '') !== 'settlement' || (h.entrySource || '').includes('single'));
   document.getElementById('a-trades').textContent = trades.length;
   if (!trades.length) {
-    document.getElementById('a-winrate').textContent = '?';
-    document.getElementById('a-pf').textContent = '?';
-    document.getElementById('a-dd').textContent = '?';
-    const w = document.getElementById('a-warning'); w.textContent = '????'; w.style.color = '#f4c96b';
+    document.getElementById('a-winrate').textContent = '--';
+    document.getElementById('a-pf').textContent = '--';
+    document.getElementById('a-dd').textContent = '--';
+    const w = document.getElementById('a-warning');
+    w.textContent = '等待样本';
+    w.style.color = '#f4c96b';
     return;
   }
   const avgCost = trades.reduce((s,h) => s + Number(h.leg1FillPrice || h.leg1Price || h.pairObservedCost || 0), 0) / trades.length;
@@ -434,11 +436,11 @@ function renderDirectionalAudit(history) {
   const avgShares = trades.reduce((s,h) => s + Number(h.leg1Shares || h.pairMatchedShares || 0), 0) / trades.length;
   document.getElementById('a-winrate').textContent = '$' + avgCost.toFixed(3);
   document.getElementById('a-pf').textContent = (avgReturn>=0?'+':'') + '$' + avgReturn.toFixed(2);
-  document.getElementById('a-dd').textContent = avgShares.toFixed(1) + ' ?';
+  document.getElementById('a-dd').textContent = avgShares.toFixed(1) + ' 份';
   const wEl = document.getElementById('a-warning');
-  if (avgReturn > 0) { wEl.textContent='????'; wEl.style.color='#42d392'; }
-  else if (avgReturn < -1) { wEl.textContent='????'; wEl.style.color='#ff6b6b'; }
-  else { wEl.textContent='????'; wEl.style.color='#f4c96b'; }
+  if (avgReturn > 0) { wEl.textContent='正收益'; wEl.style.color='#42d392'; }
+  else if (avgReturn < -1) { wEl.textContent='回撤偏大'; wEl.style.color='#ff6b6b'; }
+  else { wEl.textContent='继续观察'; wEl.style.color='#f4c96b'; }
 }
 
 function connectWS() {
@@ -452,15 +454,15 @@ function connectWS() {
 function render(s) {
   latestState = s;
   const latColor = ms => ms<=0?'':ms<60?'#42d392':ms<150?'#f4c96b':'#ff6b6b';
-  const fmtWs = (conn, age) => conn ? {t:'?? '+((age||0))+'ms',c:(age||0)<1000?'#42d392':'#f4c96b'} : {t:'??',c:'#ff6b6b'};
-  const fmtBook = (src, fb) => src==='ws'?(fb?'WS/????':'WS'):src==='http'?'HTTP??':'--';
+  const fmtWs = (conn, age) => conn ? {t:'在线 '+((age||0))+'ms',c:(age||0)<1000?'#42d392':'#f4c96b'} : {t:'断开',c:'#ff6b6b'};
+  const fmtBook = (src, fb) => src==='ws'?(fb?'WS/回退':'WS'):src==='http'?'HTTP 回退':'--';
 
   const badge = document.getElementById('badge');
   if (s.botRunning) {
-    badge.className='badge badge-run'; badge.textContent=s.tradingMode==='paper'?'???':'???';
+    badge.className='badge badge-run'; badge.textContent=s.tradingMode==='paper'?'仿真运行':'实盘运行';
     document.getElementById('btn-start').style.display='none'; document.getElementById('btn-stop').style.display='';
   } else {
-    badge.className='badge badge-stop'; badge.textContent='???';
+    badge.className='badge badge-stop'; badge.textContent='已停止';
     document.getElementById('btn-start').style.display=''; document.getElementById('btn-stop').style.display='none';
   }
 
@@ -482,59 +484,59 @@ function render(s) {
 
   const secs = Math.max(0,Math.floor(s.secondsLeft));
   document.getElementById('timer').textContent = fmtSecs(secs);
-  document.getElementById('market-q').textContent = s.currentMarket || '????...';
+  document.getElementById('market-q').textContent = s.currentMarket || '等待市场...';
   const pct = Math.max(0,Math.min(100,secs/900*100));
   const fill = document.getElementById('timer-fill');
   fill.style.width = pct+'%';
   fill.style.background = pct>50?'#76b7ff':pct>20?'#f4c96b':'#ff6b6b';
   const ewEl = document.getElementById('entry-window');
-  ewEl.textContent = s.canOpenNewPosition ? fmtSecs(s.entryWindowLeft||0) : '??';
+  ewEl.textContent = s.canOpenNewPosition ? fmtSecs(s.entryWindowLeft||0) : '已关闭';
   ewEl.style.color = s.canOpenNewPosition ? '#42d392' : '#ff6b6b';
   document.getElementById('round-progress').textContent = Math.round(s.roundProgressPct||0)+'%';
   document.getElementById('next-round').textContent = s.nextRoundIn>0?fmtSecs(s.nextRoundIn):'--';
   const decEl = document.getElementById('round-decision');
   decEl.textContent = s.roundDecision || '--';
-  decEl.style.color = (s.roundDecision||'').includes('??')?'#ff6b6b':'#ecf3ff';
+  decEl.style.color = (s.roundDecision||'').toLowerCase().includes('reject') || (s.roundDecision||'').includes('ignore') ? '#ff6b6b' : '#ecf3ff';
 
-  const stMap = {off:'??',watching:'???',single_pending:'??????',single_open:'?????',pair_pending:'??',pair_open:'??',leg1_filled:'??',done:'??'};
+  const stMap = {off:'空闲',watching:'观察中',single_pending:'等待成交',single_open:'单边持仓',pair_pending:'旧状态',pair_open:'旧状态',leg1_filled:'首腿成交',done:'已完成'};
   document.getElementById('h-state').textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
   document.getElementById('h-hedge-state').textContent = stMap[s.hedgeState] || s.hedgeState || '--';
-  document.getElementById('h-mode').textContent = s.tradingMode==='paper'?'??'+(s.paperSessionMode==='persistent'?'/??':'/??'):'??';
+  document.getElementById('h-mode').textContent = s.tradingMode==='paper' ? ('仿真/' + (s.paperSessionMode==='persistent' ? '累计' : '单次')) : '实盘/Polymarket';
   document.getElementById('h-btc').textContent = s.btcPrice>0?'$'+s.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2}):'--';
   document.getElementById('h-funds').textContent = '$'+Number(s.cashBalance||0).toFixed(2)+' + $'+Number(s.openPositionValue||0).toFixed(2);
   document.getElementById('h-up-ev').textContent = s.upAsk>0 ? '$'+s.upAsk.toFixed(2) : '--';
   document.getElementById('h-dn-ev').textContent = s.downAsk>0 ? '$'+s.downAsk.toFixed(2) : '--';
-  document.getElementById('h-bs-fair').textContent = (s.hedgeLeg1Price>0?'$'+Number(s.hedgeLeg1Price).toFixed(3):'--')+' / '+(s.singleSide?String(s.singleSide).toUpperCase():'--');
+  document.getElementById('h-bs-fair').textContent = (s.hedgeLeg1Price>0?'$'+Number(s.hedgeLeg1Price).toFixed(3):'--')+' / '+(s.lastFillPrice>0?'$'+Number(s.lastFillPrice).toFixed(3):'--');
   const reboundEl = document.getElementById('h-net-edge');
   reboundEl.textContent = (s.singleTrailArmed ? 'trail on' : 'trail off') + ' / peak ' + (Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--');
   reboundEl.style.color = s.singleTrailArmed ? '#42d392' : '#f4c96b';
   document.getElementById('h-leg1').innerHTML = s.hedgeState==='single_open'
     ? '<span class="tag tag-b">'+(s.singleSide||'--').toUpperCase()+' @$'+Number(s.hedgeLeg1Price||0).toFixed(3)+'</span>'
     : '--';
-  document.getElementById('h-preorder').textContent = s.hedgeState==='single_open'?'??????':'??????';
+  document.getElementById('h-preorder').textContent = s.hedgeState==='single_open' ? '持仓管理中' : '等待入场信号';
   const xEl = document.getElementById('h-expected');
-  xEl.textContent = 'TP +'+Number(s.singleTakeProfitArm||0).toFixed(3)+' / ?? '+Number(s.singleTrailRetrace||0).toFixed(3)+' / ?? '+Number(s.singleMaxHoldSecs||0)+'s';
+  xEl.textContent = 'TP +' + Number(s.singleTakeProfitArm||0).toFixed(3) + ' / 回撤 ' + Number(s.singleTrailRetrace||0).toFixed(3) + ' / 超时 ' + Number(s.singleMaxHoldSecs||0) + 's';
   xEl.style.color = '#f4c96b';
   document.getElementById('h-share-cap').textContent = 'SINGLE '+Number(s.singleShareCap||0).toFixed(0);
   document.getElementById('h-bsm-reject').textContent = s.roundDecision || '--';
 
   const dumpSt = document.getElementById('dump-status');
-  dumpSt.innerHTML = s.dumpDetected ? '<span class="tag tag-r">'+String(s.dumpDetected).slice(0,40)+'</span>' : '<span class="tag tag-b">?????</span>';
-  document.getElementById('dump-confirm').textContent = s.pairBestObservedCost>0 ? s.pairBestObservedCost.toFixed(3) : '--';
+  dumpSt.innerHTML = s.dumpDetected ? '<span class="tag tag-r">'+String(s.dumpDetected).slice(0,40)+'</span>' : '<span class="tag tag-b">观察中</span>';
+  document.getElementById('dump-confirm').textContent = s.roundLowObserved>0 ? Number(s.roundLowObserved).toFixed(3) : '--';
   document.getElementById('dump-signals').textContent = '+' + Number(s.singleTakeProfitArm||0).toFixed(3) + ' / ' + (s.singleTrailArmed ? 'on' : 'off');
   document.getElementById('dump-mom-rej').textContent = (s.hedgeState==='single_open' && s.openPositionValue>0 && s.hedgeLeg1Price>0) ? Math.round(s.openPositionValue / s.hedgeLeg1Price) : '--';
   document.getElementById('dump-ask-rej').textContent = Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--';
 
-  document.getElementById('p-kelly').textContent = '??????';
-  document.getElementById('p-dual-ask').textContent = '??';
-  document.getElementById('p-max-ask').textContent = '?$0.150';
-  document.getElementById('p-edge-rule').textContent = '+'+Number(s.singleTakeProfitArm||0).toFixed(3)+' ??';
-  document.getElementById('p-dump-confirm').textContent = '??8s / ??0.015';
-  document.getElementById('p-window').textContent = '??>'+s.rtMinEntrySecs+'s';
+  document.getElementById('p-kelly').textContent = '极端低价反弹';
+  document.getElementById('p-dual-ask').textContent = '<= $0.150';
+  document.getElementById('p-max-ask').textContent = '逆向 <= 0.25%';
+  document.getElementById('p-edge-rule').textContent = '+'+Number(s.singleTakeProfitArm||0).toFixed(3)+' 启动';
+  document.getElementById('p-dump-confirm').textContent = '低位 8s / 回抽 0.015';
+  document.getElementById('p-window').textContent = '剩余 > '+Number(s.rtMinEntrySecs||0)+'s';
 
   const l50 = s.latencyP50||0;
   const lEl = document.getElementById('h-lat-p50');
-  lEl.textContent = l50>0?l50+'ms ? '+((s.latencyNetworkSource||'ping').toUpperCase()):'--';
+  lEl.textContent = l50>0?l50+'ms / '+((s.latencyNetworkSource||'ping').toUpperCase()):'--';
   lEl.style.color = latColor(l50);
   const d = s.diagnostics||{};
   const mw = fmtWs(d.marketWsConnected, d.marketWsAgeMs);
