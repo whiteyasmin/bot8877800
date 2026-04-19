@@ -308,15 +308,12 @@ tr:hover{background:rgba(118,183,255,.03)}
           <table>
             <thead>
               <tr>
-                <th>时间</th>
-                <th>结果</th>
-                <th>方向</th>
                 <th>入场</th>
-                <th>EV/份</th>
-                <th>成本</th>
+                <th>方向</th>
+                <th>份数</th>
+                <th>出场类型</th>
                 <th>盈亏</th>
-                <th>累计</th>
-                <th style="min-width:160px">理由</th>
+                <th style="min-width:160px">说明</th>
               </tr>
             </thead>
             <tbody id="history-body"></tbody>
@@ -423,25 +420,25 @@ async function refreshAudit() {
 }
 
 function renderDirectionalAudit(history) {
-  const settled = (history || []).filter(h => h.exitType === 'settlement' && ((h.pairObservedCost || 0) > 0 || (h.leg1FillPrice || h.leg1Price || 0) > 0));
-  document.getElementById('a-trades').textContent = settled.length;
-  if (!settled.length) {
-    document.getElementById('a-winrate').textContent = '—';
-    document.getElementById('a-pf').textContent = '—';
-    document.getElementById('a-dd').textContent = '—';
-    const w = document.getElementById('a-warning'); w.textContent = '样本不足'; w.style.color = '#f4c96b';
+  const trades = (history || []).filter(h => (h.exitType || '') !== 'settlement' || (h.entrySource || '').includes('single'));
+  document.getElementById('a-trades').textContent = trades.length;
+  if (!trades.length) {
+    document.getElementById('a-winrate').textContent = '?';
+    document.getElementById('a-pf').textContent = '?';
+    document.getElementById('a-dd').textContent = '?';
+    const w = document.getElementById('a-warning'); w.textContent = '????'; w.style.color = '#f4c96b';
     return;
   }
-  const avgCost = settled.reduce((s,h) => s + Number(h.pairObservedCost || h.leg1FillPrice || h.leg1Price || 0), 0) / settled.length;
-  const avgEdge = settled.reduce((s,h) => s + Number(h.entryEffectiveEdge || 0), 0) / settled.length;
-  const avgShares = settled.reduce((s,h) => s + Number(h.pairMatchedShares || h.leg1Shares || 0), 0) / settled.length;
+  const avgCost = trades.reduce((s,h) => s + Number(h.leg1FillPrice || h.leg1Price || h.pairObservedCost || 0), 0) / trades.length;
+  const avgReturn = trades.reduce((s,h) => s + Number(h.profit || 0), 0) / trades.length;
+  const avgShares = trades.reduce((s,h) => s + Number(h.leg1Shares || h.pairMatchedShares || 0), 0) / trades.length;
   document.getElementById('a-winrate').textContent = '$' + avgCost.toFixed(3);
-  document.getElementById('a-pf').textContent = (avgEdge>=0?'+':'') + (avgEdge * 100).toFixed(1) + '%';
-  document.getElementById('a-dd').textContent = avgShares.toFixed(1) + ' 对';
+  document.getElementById('a-pf').textContent = (avgReturn>=0?'+':'') + '$' + avgReturn.toFixed(2);
+  document.getElementById('a-dd').textContent = avgShares.toFixed(1) + ' ?';
   const wEl = document.getElementById('a-warning');
-  if (avgEdge >= 0.03) { wEl.textContent='配对健康'; wEl.style.color='#42d392'; }
-  else if (avgEdge < 0.015) { wEl.textContent='边际偏弱'; wEl.style.color='#ff6b6b'; }
-  else { wEl.textContent='继续观察'; wEl.style.color='#f4c96b'; }
+  if (avgReturn > 0) { wEl.textContent='????'; wEl.style.color='#42d392'; }
+  else if (avgReturn < -1) { wEl.textContent='????'; wEl.style.color='#ff6b6b'; }
+  else { wEl.textContent='????'; wEl.style.color='#f4c96b'; }
 }
 
 function connectWS() {
@@ -455,170 +452,110 @@ function connectWS() {
 function render(s) {
   latestState = s;
   const latColor = ms => ms<=0?'':ms<60?'#42d392':ms<150?'#f4c96b':'#ff6b6b';
-  const fmtWs = (conn, age) => conn ? {t:'在线 '+((age||0))+'ms',c:(age||0)<1000?'#42d392':'#f4c96b'} : {t:'断开',c:'#ff6b6b'};
-  const fmtBook = (src, fb) => src==='ws'?(fb?'WS/回退待命':'WS'):src==='http'?'HTTP回退':'--';
-  // Badge
+  const fmtWs = (conn, age) => conn ? {t:'?? '+((age||0))+'ms',c:(age||0)<1000?'#42d392':'#f4c96b'} : {t:'??',c:'#ff6b6b'};
+  const fmtBook = (src, fb) => src==='ws'?(fb?'WS/????':'WS'):src==='http'?'HTTP??':'--';
+
   const badge = document.getElementById('badge');
   if (s.botRunning) {
-    badge.className='badge badge-run'; badge.textContent=s.tradingMode==='paper'?'仿真盘':'运行中';
+    badge.className='badge badge-run'; badge.textContent=s.tradingMode==='paper'?'???':'???';
     document.getElementById('btn-start').style.display='none'; document.getElementById('btn-stop').style.display='';
   } else {
-    badge.className='badge badge-stop'; badge.textContent='已停止';
+    badge.className='badge badge-stop'; badge.textContent='???';
     document.getElementById('btn-start').style.display=''; document.getElementById('btn-stop').style.display='none';
   }
 
-  // Stat strip
   const pEl = document.getElementById('s-profit');
-  pEl.textContent = (s.totalProfit>=0?'+':'')+'\$'+s.totalProfit.toFixed(2);
+  pEl.textContent = (s.totalProfit>=0?'+':'')+'$'+s.totalProfit.toFixed(2);
   pEl.style.color = s.totalProfit>=0?'#42d392':'#ff6b6b';
-  document.getElementById('s-balance').textContent = '\$'+s.balance.toFixed(2);
-  document.getElementById('s-cash').textContent = '\$'+Number(s.cashBalance||0).toFixed(2);
-  document.getElementById('s-open-value').textContent = '\$'+Number(s.openPositionValue||0).toFixed(2);
+  document.getElementById('s-balance').textContent = '$'+s.balance.toFixed(2);
+  document.getElementById('s-cash').textContent = '$'+Number(s.cashBalance||0).toFixed(2);
+  document.getElementById('s-open-value').textContent = '$'+Number(s.openPositionValue||0).toFixed(2);
   document.getElementById('s-record').textContent = s.wins+'W/'+s.losses+'L '+s.sessionROI.toFixed(1)+'%';
   document.getElementById('s-sizing').textContent = Number(s.sizingMultiplier||1).toFixed(2)+'x';
-  const bestEdge = Math.max(Number(s.upNetEdge || -1), Number(s.downNetEdge || -1));
   const avgEvEl = document.getElementById('s-avg-ev');
-  const settled = (s.history||[]).filter(h=>h.exitType==='settlement'&&((h.pairObservedCost||0)>0||(h.leg1FillPrice||h.leg1Price||0)>0));
-  if (settled.length>0) {
-    const totalShares = settled.reduce((a,h)=>a+(h.pairMatchedShares||h.leg1Shares||0),0);
-    const totalPnl = settled.reduce((a,h)=>a+h.profit,0);
-    const avgEv = totalShares>0?totalPnl/totalShares:0;
-    avgEvEl.textContent = (avgEv>=0?'+':'')+'\$'+avgEv.toFixed(3);
-    avgEvEl.style.color = avgEv>0?'#42d392':avgEv<0?'#ff6b6b':'#f4c96b';
+  const trades = s.history || [];
+  if (trades.length>0) {
+    const avgPnl = trades.reduce((a,h)=>a+Number(h.profit||0),0) / trades.length;
+    avgEvEl.textContent = (avgPnl>=0?'+':'')+'$'+avgPnl.toFixed(2);
+    avgEvEl.style.color = avgPnl>0?'#42d392':avgPnl<0?'#ff6b6b':'#f4c96b';
   } else { avgEvEl.textContent='--'; avgEvEl.style.color=''; }
 
-  // Timer
   const secs = Math.max(0,Math.floor(s.secondsLeft));
   document.getElementById('timer').textContent = fmtSecs(secs);
-  document.getElementById('market-q').textContent = s.currentMarket || '等待市场...';
+  document.getElementById('market-q').textContent = s.currentMarket || '????...';
   const pct = Math.max(0,Math.min(100,secs/900*100));
   const fill = document.getElementById('timer-fill');
   fill.style.width = pct+'%';
   fill.style.background = pct>50?'#76b7ff':pct>20?'#f4c96b':'#ff6b6b';
   const ewEl = document.getElementById('entry-window');
-  ewEl.textContent = s.canOpenNewPosition ? fmtSecs(s.entryWindowLeft||0) : '关闭';
+  ewEl.textContent = s.canOpenNewPosition ? fmtSecs(s.entryWindowLeft||0) : '??';
   ewEl.style.color = s.canOpenNewPosition ? '#42d392' : '#ff6b6b';
   document.getElementById('round-progress').textContent = Math.round(s.roundProgressPct||0)+'%';
-  const nrEl = document.getElementById('next-round');
-  nrEl.textContent = s.nextRoundIn>0?fmtSecs(s.nextRoundIn):'--';
+  document.getElementById('next-round').textContent = s.nextRoundIn>0?fmtSecs(s.nextRoundIn):'--';
   const decEl = document.getElementById('round-decision');
   decEl.textContent = s.roundDecision || '--';
-  decEl.style.color = (s.roundDecision||'').includes('跳过')?'#ff6b6b':'#ecf3ff';
+  decEl.style.color = (s.roundDecision||'').includes('??')?'#ff6b6b':'#ecf3ff';
 
-  // Position & Market
-  const stMap = {off:'待命',watching:'监控中',single_pending:'单边下单中',single_open:'单边待对冲',pair_pending:'配对下单中',pair_open:'已配对持仓',leg1_filled:'已配对持仓',done:'完成'};
-  const stEl = document.getElementById('h-state');
-  stEl.textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
-  stEl.style.color = (s.status||'').includes('跳过')?'#f4c96b':'';
+  const stMap = {off:'??',watching:'???',single_pending:'??????',single_open:'?????',pair_pending:'??',pair_open:'??',leg1_filled:'??',done:'??'};
+  document.getElementById('h-state').textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
   document.getElementById('h-hedge-state').textContent = stMap[s.hedgeState] || s.hedgeState || '--';
-  document.getElementById('h-mode').textContent = s.tradingMode==='paper'?'仿真'+(s.paperSessionMode==='persistent'?'/累计':'/单次'):'实盘';
-  document.getElementById('h-btc').textContent = s.btcPrice>0?'\$'+s.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2}):'--';
-  document.getElementById('h-funds').textContent = '\$'+Number(s.cashBalance||0).toFixed(2)+' + \$'+Number(s.openPositionValue||0).toFixed(2);
-  const upA = s.upAsk>0?s.upAsk.toFixed(2):'--';
-  const dnA = s.downAsk>0?s.downAsk.toFixed(2):'--';
-  document.getElementById('h-up-ev').textContent = s.upAsk>0 ? '\$'+upA : '--';
-  document.getElementById('h-dn-ev').textContent = s.downAsk>0 ? '\$'+dnA : '--';
-  const bsFairEl = document.getElementById('h-bs-fair');
-  bsFairEl.textContent = (s.pairSignalCost>0?s.pairSignalCost.toFixed(3):'--')+' / '+(s.pairObservedCost>0?s.pairObservedCost.toFixed(3):'--');
-  bsFairEl.style.color = '#76b7ff';
-  const netEdgeEl = document.getElementById('h-net-edge');
-  if (s.hedgeState === 'single_open') {
-    netEdgeEl.textContent = (s.singleTrailArmed ? 'trail on' : 'trail off') + ' / peak bid ' + (Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--');
-    netEdgeEl.style.color = s.singleTrailArmed ? '#42d392' : '#f4c96b';
-  } else {
-    const liveEdge = bestEdge > -1 ? bestEdge : NaN;
-    netEdgeEl.textContent = (Number.isFinite(liveEdge) ? ((liveEdge>=0?'+':'')+(liveEdge*100).toFixed(1)+'%') : '--')+' / '+((Number(s.pairLockedEdge||0)>=0?'+':'')+(Number(s.pairLockedEdge||0)*100).toFixed(1)+'%');
-    netEdgeEl.style.color = bestEdge>=0.15?'#42d392':bestEdge>=0.08?'#76b7ff':'#f4c96b';
-  }
-  const bsmRejectEl = document.getElementById('h-bsm-reject');
-  bsmRejectEl.textContent = s.roundDecision || '--';
-  bsmRejectEl.style.color = '#7a8ea6';
-  // 配对追踪
-  const dumpSt = document.getElementById('dump-status');
-  if (s.dumpDetected) {
-    dumpSt.innerHTML = '<span class=\"tag tag-r\">'+s.dumpDetected.substring(0, s.dumpDetected.indexOf('[') > 0 ? s.dumpDetected.indexOf('[') : 40).trim()+'</span>';
-  } else if (s.pairSignalCost > 0) {
-    dumpSt.innerHTML = '<span class="tag tag-b">PAIR '+s.pairSignalCost.toFixed(3)+'</span>';
-  } else if (s.pairBestObservedCost > 0) {
-    dumpSt.innerHTML = '<span class="tag tag-b">LOW '+s.pairBestObservedCost.toFixed(3)+'</span>';
-  } else {
-    dumpSt.textContent = '未触发'; dumpSt.style.color = '#7a8ea6';
-  }
-  document.getElementById('dump-confirm').textContent = s.pairBestObservedCost>0 ? s.pairBestObservedCost.toFixed(3) : '--';
-  // 持仓净edge per share
-  const evEl = document.getElementById('dump-signals');
-  if (s.hedgeLeg1Price > 0 || s.pairObservedCost > 0) {
-    const edge = Number((s.pairLockedEdge ?? s.leg1EffectiveEdge) || 0);
-    evEl.textContent = (edge>=0?'+':'') + (edge * 100).toFixed(1) + '%';
-    evEl.style.color = edge >= 0.15 ? '#42d392' : edge >= 0.08 ? '#76b7ff' : '#f4c96b';
-  } else {
-    evEl.textContent = '--'; evEl.style.color = '';
-  }
-  document.getElementById('dump-mom-rej').textContent = s.pairMatchedShares||0;
-  document.getElementById('dump-ask-rej').textContent = s.pairExpectedPayout>0?('$'+Number(s.pairExpectedPayout).toFixed(2)):'--';
-  if (s.hedgeLeg1Price>0 || s.pairObservedCost>0) {
-    const posEdge = Number((s.pairLockedEdge ?? s.leg1EffectiveEdge) || 0);
-    const pairCost = Number(s.pairObservedCost || s.hedgeLeg1Price || 0);
-    const pairShares = Number(s.pairMatchedShares || 0);
-    const posLabel = s.hedgeState === 'single_open' ? 'SINGLE' : 'PAIR';
-    document.getElementById('h-leg1').innerHTML='<span class="tag tag-b">'+posLabel+' @\$'+pairCost.toFixed(3)+(pairShares>0?' x'+pairShares.toFixed(0):'')+' edge'+(posEdge>=0?'+':'')+(posEdge*100).toFixed(1)+'%</span>';
-  } else {
-    document.getElementById('h-leg1').textContent='--';
-  }
+  document.getElementById('h-mode').textContent = s.tradingMode==='paper'?'??'+(s.paperSessionMode==='persistent'?'/??':'/??'):'??';
+  document.getElementById('h-btc').textContent = s.btcPrice>0?'$'+s.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2}):'--';
+  document.getElementById('h-funds').textContent = '$'+Number(s.cashBalance||0).toFixed(2)+' + $'+Number(s.openPositionValue||0).toFixed(2);
+  document.getElementById('h-up-ev').textContent = s.upAsk>0 ? '$'+s.upAsk.toFixed(2) : '--';
+  document.getElementById('h-dn-ev').textContent = s.downAsk>0 ? '$'+s.downAsk.toFixed(2) : '--';
+  document.getElementById('h-bs-fair').textContent = (s.hedgeLeg1Price>0?'$'+Number(s.hedgeLeg1Price).toFixed(3):'--')+' / '+(s.singleSide?String(s.singleSide).toUpperCase():'--');
+  const reboundEl = document.getElementById('h-net-edge');
+  reboundEl.textContent = (s.singleTrailArmed ? 'trail on' : 'trail off') + ' / peak ' + (Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--');
+  reboundEl.style.color = s.singleTrailArmed ? '#42d392' : '#f4c96b';
+  document.getElementById('h-leg1').innerHTML = s.hedgeState==='single_open'
+    ? '<span class="tag tag-b">'+(s.singleSide||'--').toUpperCase()+' @$'+Number(s.hedgeLeg1Price||0).toFixed(3)+'</span>'
+    : '--';
+  document.getElementById('h-preorder').textContent = s.hedgeState==='single_open'?'??????':'??????';
   const xEl = document.getElementById('h-expected');
-  xEl.textContent = '≤$'+s.effectiveMaxAsk.toFixed(3)+' 配对成本';
-  xEl.style.color = '#42d392';
-  document.getElementById('h-share-cap').textContent = 'PAIR '+Number(s.pairShareCap||0).toFixed(0)+' / SINGLE '+Number(s.singleShareCap||0).toFixed(0);
-  const prEl = document.getElementById('h-preorder');
-  if (prEl) {
-    prEl.textContent = (s.hedgeState==='single_open')?'等待补腿':((s.hedgeState==='watching'||s.hedgeState==='pair_pending'||s.hedgeState==='single_pending')?'双腿/单边FAK':'--');
-    prEl.style.color='#8ea0b8';
-  }
+  xEl.textContent = 'TP +'+Number(s.singleTakeProfitArm||0).toFixed(3)+' / ?? '+Number(s.singleTrailRetrace||0).toFixed(3)+' / ?? '+Number(s.singleMaxHoldSecs||0)+'s';
+  xEl.style.color = '#f4c96b';
+  document.getElementById('h-share-cap').textContent = 'SINGLE '+Number(s.singleShareCap||0).toFixed(0);
+  document.getElementById('h-bsm-reject').textContent = s.roundDecision || '--';
 
-  // Runtime params bar
-  if (s.rtMinEntrySecs != null) {
-    document.getElementById('p-kelly').textContent = '双腿FAK';
-    document.getElementById('p-dual-ask').textContent = '≤$'+s.effectiveMaxAsk.toFixed(3);
-    document.getElementById('p-max-ask').textContent = '≤$0.995';
-    document.getElementById('p-edge-rule').textContent = '≥1.5%';
-    document.getElementById('p-dump-confirm').textContent = s.pairBestObservedCost>0?s.pairBestObservedCost.toFixed(3):'--';
-    document.getElementById('p-window').textContent = '剩余>'+s.rtMinEntrySecs+'s';
-  }
+  const dumpSt = document.getElementById('dump-status');
+  dumpSt.innerHTML = s.dumpDetected ? '<span class="tag tag-r">'+String(s.dumpDetected).slice(0,40)+'</span>' : '<span class="tag tag-b">?????</span>';
+  document.getElementById('dump-confirm').textContent = s.pairBestObservedCost>0 ? s.pairBestObservedCost.toFixed(3) : '--';
+  document.getElementById('dump-signals').textContent = '+' + Number(s.singleTakeProfitArm||0).toFixed(3) + ' / ' + (s.singleTrailArmed ? 'on' : 'off');
+  document.getElementById('dump-mom-rej').textContent = (s.hedgeState==='single_open' && s.openPositionValue>0 && s.hedgeLeg1Price>0) ? Math.round(s.openPositionValue / s.hedgeLeg1Price) : '--';
+  document.getElementById('dump-ask-rej').textContent = Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--';
 
-  // Infra
+  document.getElementById('p-kelly').textContent = '??????';
+  document.getElementById('p-dual-ask').textContent = '??';
+  document.getElementById('p-max-ask').textContent = '?$0.150';
+  document.getElementById('p-edge-rule').textContent = '+'+Number(s.singleTakeProfitArm||0).toFixed(3)+' ??';
+  document.getElementById('p-dump-confirm').textContent = '??8s / ??0.015';
+  document.getElementById('p-window').textContent = '??>'+s.rtMinEntrySecs+'s';
+
   const l50 = s.latencyP50||0;
   const lEl = document.getElementById('h-lat-p50');
-  lEl.textContent = l50>0?l50+'ms · '+((s.latencyNetworkSource||'ping').toUpperCase()):'--';
+  lEl.textContent = l50>0?l50+'ms ? '+((s.latencyNetworkSource||'ping').toUpperCase()):'--';
   lEl.style.color = latColor(l50);
   const d = s.diagnostics||{};
   const mw = fmtWs(d.marketWsConnected, d.marketWsAgeMs);
-  const mwEl = document.getElementById('h-market-ws'); mwEl.textContent=mw.t; mwEl.style.color=mw.c;
+  document.getElementById('h-market-ws').textContent=mw.t; document.getElementById('h-market-ws').style.color=mw.c;
   const bsEl = document.getElementById('h-book-source');
   bsEl.textContent = fmtBook(d.orderbookSource, d.fallbackActive);
   bsEl.style.color = d.orderbookSource==='ws'?'#42d392':d.orderbookSource==='http'?'#f4c96b':'';
 
-  // History table
   const tbody = document.getElementById('history-body');
   const rows = (s.history||[]).slice().reverse().slice(0,50);
   tbody.innerHTML = rows.map(h => {
-    const cls = h.result==='WIN'?'tag-g':'tag-r';
-    const pf = h.profit>=0?'+\$'+h.profit.toFixed(2):'-\$'+Math.abs(h.profit).toFixed(2);
-    const cost = h.pairObservedCost>0 ? h.pairObservedCost : (h.leg1FillPrice>0 ? h.leg1FillPrice : (h.leg1Price||0));
-    const l1 = '\$'+Number(cost||0).toFixed(h.pairObservedCost>0 ? 3 : 2);
-    const est = h.estimated?'<span style="color:#f4c96b" title="估算"> ⚠</span>':'';
-    const bd = h.profitBreakdown?' title="'+h.profitBreakdown.replace(/"/g,'&quot;')+'"':'';
-    const hEdge = Number(h.entryEffectiveEdge || 0);
-    const hTier = h.entryEdgeTier || '--';
-    const shares = Number(h.pairMatchedShares || h.leg1Shares || 0);
-    const side = h.winningLeg ? ('PAIR/'+String(h.winningLeg).toUpperCase()) : h.leg1Dir;
-    return '<tr><td>'+h.time+'</td>'
-      +'<td><span class="tag '+cls+'">'+h.result+'</span>'+est+'</td>'
-      +'<td>'+side+'</td>'
-      +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+shares.toFixed(0)+'</small></td>'
-      +'<td style="color:'+(hEdge>=0.15?'#42d392':hEdge>=0.08?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
-      +'<td>\$'+(h.totalCost||0).toFixed(2)+'</td>'
-      +'<td style="color:'+(h.profit>=0?'#42d392':'#ff6b6b')+'"'+bd+'>'+pf+'</td>'
-      +'<td style="color:'+(h.cumProfit>=0?'#42d392':'#ff6b6b')+'">\$'+(h.cumProfit||0).toFixed(2)+'</td>'
+    const pf = h.profit>=0?'+$'+h.profit.toFixed(2):'-$'+Math.abs(h.profit).toFixed(2);
+    const cost = h.leg1FillPrice>0 ? h.leg1FillPrice : (h.leg1Price||0);
+    const shares = Number(h.leg1Shares || h.pairMatchedShares || 0);
+    const exitType = h.exitType || '--';
+    return '<tr>'
+      +'<td>$'+Number(cost||0).toFixed(3)+'</td>'
+      +'<td>'+(h.leg1Dir||'--')+'</td>'
+      +'<td>'+shares.toFixed(0)+'</td>'
+      +'<td>'+exitType+'</td>'
+      +'<td style="color:'+(h.profit>=0?'#42d392':'#ff6b6b')+'">'+pf+'</td>'
       +'<td style="font-size:10px;color:#7a8ea6;max-width:180px;white-space:normal;line-height:1.3">'+(h.exitReason||'-')+'</td></tr>';
   }).join('');
 
