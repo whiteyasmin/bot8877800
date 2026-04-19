@@ -179,9 +179,12 @@ tr:hover{background:rgba(118,183,255,.03)}
     <!-- Top stat strip -->
     <div class="stat-strip">
       <div class="cell"><div class="val" id="s-profit">$0.00</div><div class="lbl">总盈亏</div></div>
-      <div class="cell"><div class="val" id="s-balance">$0.00</div><div class="lbl">余额</div></div>
+      <div class="cell"><div class="val" id="s-balance">$0.00</div><div class="lbl">权益</div></div>
+      <div class="cell"><div class="val" id="s-cash">$0.00</div><div class="lbl">现金</div></div>
+      <div class="cell"><div class="val" id="s-open-value">$0.00</div><div class="lbl">持仓估值</div></div>
       <div class="cell"><div class="val" id="s-record">0W / 0L</div><div class="lbl">战绩 / ROI</div></div>
       <div class="cell"><div class="val" id="s-avg-ev">--</div><div class="lbl">历史 $/对</div></div>
+      <div class="cell"><div class="val" id="s-sizing">1.00x</div><div class="lbl">动态仓位</div></div>
     </div>
 
     <div class="grid">
@@ -207,8 +210,10 @@ tr:hover{background:rgba(118,183,255,.03)}
         <h3>持仓 · 盘口</h3>
         <div class="kv">
           <div class="r"><span class="k">状态</span><span class="v" id="h-state">--</span></div>
+          <div class="r"><span class="k">对冲状态</span><span class="v" id="h-hedge-state">--</span></div>
           <div class="r"><span class="k">模式</span><span class="v" id="h-mode">--</span></div>
           <div class="r"><span class="k">BTC</span><span class="v" id="h-btc">--</span></div>
+          <div class="r"><span class="k">资金拆分</span><span class="v" id="h-funds">--</span></div>
           <div class="r"><span class="k">UP Ask</span><span class="v" id="h-up-ev">--</span></div>
           <div class="r"><span class="k">DN Ask</span><span class="v" id="h-dn-ev">--</span></div>
           <div class="r"><span class="k">成本 信号/成交</span><span class="v" id="h-bs-fair">--</span></div>
@@ -216,6 +221,7 @@ tr:hover{background:rgba(118,183,255,.03)}
           <div class="r"><span class="k">持仓</span><span class="v" id="h-leg1">--</span></div>
           <div class="r"><span class="k">执行方式</span><span class="v" id="h-preorder">--</span></div>
           <div class="r"><span class="k">目标成本</span><span class="v" id="h-expected">--</span></div>
+          <div class="r"><span class="k">仓位上限</span><span class="v" id="h-share-cap">--</span></div>
           <div class="r"><span class="k">本轮说明</span><span class="v" id="h-bsm-reject">--</span></div>
         </div>
         <div style="margin-top:8px;padding:8px;border-radius:6px;background:rgba(8,15,24,.6);font-size:11px">
@@ -466,7 +472,10 @@ function render(s) {
   pEl.textContent = (s.totalProfit>=0?'+':'')+'\$'+s.totalProfit.toFixed(2);
   pEl.style.color = s.totalProfit>=0?'#42d392':'#ff6b6b';
   document.getElementById('s-balance').textContent = '\$'+s.balance.toFixed(2);
+  document.getElementById('s-cash').textContent = '\$'+Number(s.cashBalance||0).toFixed(2);
+  document.getElementById('s-open-value').textContent = '\$'+Number(s.openPositionValue||0).toFixed(2);
   document.getElementById('s-record').textContent = s.wins+'W/'+s.losses+'L '+s.sessionROI.toFixed(1)+'%';
+  document.getElementById('s-sizing').textContent = Number(s.sizingMultiplier||1).toFixed(2)+'x';
   const bestEdge = Math.max(Number(s.upNetEdge || -1), Number(s.downNetEdge || -1));
   const avgEvEl = document.getElementById('s-avg-ev');
   const settled = (s.history||[]).filter(h=>h.exitType==='settlement'&&((h.pairObservedCost||0)>0||(h.leg1FillPrice||h.leg1Price||0)>0));
@@ -501,8 +510,10 @@ function render(s) {
   const stEl = document.getElementById('h-state');
   stEl.textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
   stEl.style.color = (s.status||'').includes('跳过')?'#f4c96b':'';
+  document.getElementById('h-hedge-state').textContent = stMap[s.hedgeState] || s.hedgeState || '--';
   document.getElementById('h-mode').textContent = s.tradingMode==='paper'?'仿真'+(s.paperSessionMode==='persistent'?'/累计':'/单次'):'实盘';
   document.getElementById('h-btc').textContent = s.btcPrice>0?'\$'+s.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2}):'--';
+  document.getElementById('h-funds').textContent = '\$'+Number(s.cashBalance||0).toFixed(2)+' + \$'+Number(s.openPositionValue||0).toFixed(2);
   const upA = s.upAsk>0?s.upAsk.toFixed(2):'--';
   const dnA = s.downAsk>0?s.downAsk.toFixed(2):'--';
   document.getElementById('h-up-ev').textContent = s.upAsk>0 ? '\$'+upA : '--';
@@ -552,6 +563,7 @@ function render(s) {
   const xEl = document.getElementById('h-expected');
   xEl.textContent = '≤$'+s.effectiveMaxAsk.toFixed(3)+' 配对成本';
   xEl.style.color = '#42d392';
+  document.getElementById('h-share-cap').textContent = 'PAIR '+Number(s.pairShareCap||0).toFixed(0)+' / SINGLE '+Number(s.singleShareCap||0).toFixed(0);
   const prEl = document.getElementById('h-preorder');
   if (prEl) {
     prEl.textContent = (s.hedgeState==='single_open')?'等待补腿':((s.hedgeState==='watching'||s.hedgeState==='pair_pending'||s.hedgeState==='single_pending')?'双腿/单边FAK':'--');
@@ -617,4 +629,3 @@ function render(s) {
 </script>
 </body>
 </html>
-

@@ -138,6 +138,9 @@ export interface Hedge15mState {
   cashBalance: number;
   equity: number;
   openPositionValue: number;
+  sizingMultiplier: number;
+  pairShareCap: number;
+  singleShareCap: number;
   totalProfit: number;
   wins: number;
   losses: number;
@@ -1888,6 +1891,9 @@ export class Hedge15mEngine {
     const lat = getLatencySnapshot();
     const openPositionValue = this.getOpenPositionValue();
     const equity = this.balance + openPositionValue;
+    const sizingMultiplier = this.getSizingMultiplier();
+    const pairShareCap = this.getDynamicPairShareCap();
+    const singleShareCap = this.getDynamicSingleShareCap();
 
     return {
       botRunning: this.running,
@@ -1909,6 +1915,9 @@ export class Hedge15mEngine {
       cashBalance: this.balance,
       equity,
       openPositionValue,
+      sizingMultiplier,
+      pairShareCap,
+      singleShareCap,
       totalProfit: this.totalProfit,
       wins: this.wins,
       losses: this.losses,
