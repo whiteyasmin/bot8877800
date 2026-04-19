@@ -155,7 +155,7 @@ tr:hover{background:rgba(118,183,255,.03)}
 <div id="login-overlay">
   <div class="login-box">
     <h2>Vortex-15m</h2>
-    <p class="login-sub">BTC 15分钟趋势分腿 · 锁利对冲引擎</p>
+    <p class="login-sub">BTC 15分钟趋势盘 · 双腿套利 + 极端低价反弹</p>
     <label>密码</label>
     <input type="password" id="pwd" autocomplete="current-password">
     <div style="margin-top:14px"><button class="btn-g" onclick="doLogin()" style="width:100%">登录</button></div>
@@ -207,33 +207,33 @@ tr:hover{background:rgba(118,183,255,.03)}
 
       <!-- Col 2: Position & Market -->
       <div class="card c5">
-        <h3>持仓 · 盘口</h3>
+        <h3>持仓 · 反弹监控</h3>
         <div class="kv">
           <div class="r"><span class="k">状态</span><span class="v" id="h-state">--</span></div>
-          <div class="r"><span class="k">对冲状态</span><span class="v" id="h-hedge-state">--</span></div>
+          <div class="r"><span class="k">策略状态</span><span class="v" id="h-hedge-state">--</span></div>
           <div class="r"><span class="k">模式</span><span class="v" id="h-mode">--</span></div>
           <div class="r"><span class="k">BTC</span><span class="v" id="h-btc">--</span></div>
           <div class="r"><span class="k">资金拆分</span><span class="v" id="h-funds">--</span></div>
           <div class="r"><span class="k">UP Ask</span><span class="v" id="h-up-ev">--</span></div>
           <div class="r"><span class="k">DN Ask</span><span class="v" id="h-dn-ev">--</span></div>
           <div class="r"><span class="k">成本 信号/成交</span><span class="v" id="h-bs-fair">--</span></div>
-          <div class="r"><span class="k">Edge 实时/锁定</span><span class="v" id="h-net-edge">--</span></div>
+          <div class="r"><span class="k">反弹状态</span><span class="v" id="h-net-edge">--</span></div>
           <div class="r"><span class="k">持仓</span><span class="v" id="h-leg1">--</span></div>
           <div class="r"><span class="k">执行方式</span><span class="v" id="h-preorder">--</span></div>
-          <div class="r"><span class="k">目标成本</span><span class="v" id="h-expected">--</span></div>
+          <div class="r"><span class="k">出场规则</span><span class="v" id="h-expected">--</span></div>
           <div class="r"><span class="k">仓位上限</span><span class="v" id="h-share-cap">--</span></div>
           <div class="r"><span class="k">本轮说明</span><span class="v" id="h-bsm-reject">--</span></div>
         </div>
         <div style="margin-top:8px;padding:8px;border-radius:6px;background:rgba(8,15,24,.6);font-size:11px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <span style="color:var(--muted);font-weight:600">趋势分腿监控</span>
+            <span style="color:var(--muted);font-weight:600">机会监控</span>
             <span id="dump-status" style="font-family:var(--mono)">--</span>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;color:var(--muted)">
             <span>本局/近期低 <b id="dump-confirm" style="color:var(--text)">--</b></span>
-            <span>锁定Edge <b id="dump-signals" style="color:var(--text)">--</b></span>
-            <span>配对份数 <b id="dump-mom-rej" style="color:var(--text)">--</b></span>
-            <span>预计回收 <b id="dump-ask-rej" style="color:var(--text)">--</b></span>
+            <span>止盈臂/追踪 <b id="dump-signals" style="color:var(--text)">--</b></span>
+            <span>持仓份数 <b id="dump-mom-rej" style="color:var(--text)">--</b></span>
+            <span>峰值 Bid <b id="dump-ask-rej" style="color:var(--text)">--</b></span>
           </div>
         </div>
       </div>
@@ -243,12 +243,12 @@ tr:hover{background:rgba(118,183,255,.03)}
         <h3>统计 · 连接</h3>
         <div class="hero3">
           <div class="box"><div class="eye">样本</div><div class="big" id="a-trades">--</div></div>
-          <div class="box"><div class="eye">平均成本</div><div class="big" id="a-winrate">--</div></div>
-          <div class="box"><div class="eye">健康度</div><div class="big" id="a-warning">--</div></div>
+          <div class="box"><div class="eye">平均入场</div><div class="big" id="a-winrate">--</div></div>
+          <div class="box"><div class="eye">策略状态</div><div class="big" id="a-warning">--</div></div>
         </div>
         <div class="kv single">
-          <div class="r"><span class="k">平均锁定 Edge</span><span class="v" id="a-pf">--</span></div>
-          <div class="r"><span class="k">平均配对份数</span><span class="v" id="a-dd">--</span></div>
+          <div class="r"><span class="k">平均单笔收益率</span><span class="v" id="a-pf">--</span></div>
+          <div class="r"><span class="k">平均持仓份数</span><span class="v" id="a-dd">--</span></div>
         </div>
         <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
           <div class="kv single">
@@ -275,7 +275,7 @@ tr:hover{background:rgba(118,183,255,.03)}
             <label>仿真余额</label>
             <input type="number" id="cfg-paper-balance" placeholder="100" value="100" min="10" step="10">
           </div>
-          <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成 (仓位/时间窗/阈值)</div>
+          <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成（双腿套利 + 极端低价反弹）</div>
           <div>
             <label>资金地址</label>
             <input type="text" id="cfg-fa" placeholder="0x..." autocomplete="off">
@@ -291,11 +291,11 @@ tr:hover{background:rgba(118,183,255,.03)}
       <div class="card c6">
         <h3>运行摘要</h3>
         <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:11px" id="params-bar">
-          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">趋势分腿FAK</b></span>
-          <span style="color:var(--muted)">信号成本上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">执行成本上限 <b id="p-max-ask" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">最小锁定Edge <b id="p-edge-rule" style="color:var(--text)">--</b></span>
-          <span style="color:var(--muted)">低点参考 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">执行 <b id="p-kelly" style="color:var(--text)">双腿套利 / 极端反弹</b></span>
+          <span style="color:var(--muted)">双腿成本上限 <b id="p-dual-ask" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">单边入场上限 <b id="p-max-ask" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">反弹止盈启动 <b id="p-edge-rule" style="color:var(--text)">--</b></span>
+          <span style="color:var(--muted)">低点确认 <b id="p-dump-confirm" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">开仓窗口 <b id="p-window" style="color:var(--text)">--</b></span>
           <span style="color:var(--muted)">费用 <b style="color:var(--green)">taker 2%</b></span>
         </div>
@@ -522,9 +522,14 @@ function render(s) {
   bsFairEl.textContent = (s.pairSignalCost>0?s.pairSignalCost.toFixed(3):'--')+' / '+(s.pairObservedCost>0?s.pairObservedCost.toFixed(3):'--');
   bsFairEl.style.color = '#76b7ff';
   const netEdgeEl = document.getElementById('h-net-edge');
-  const liveEdge = bestEdge > -1 ? bestEdge : NaN;
-  netEdgeEl.textContent = (Number.isFinite(liveEdge) ? ((liveEdge>=0?'+':'')+(liveEdge*100).toFixed(1)+'%') : '--')+' / '+((Number(s.pairLockedEdge||0)>=0?'+':'')+(Number(s.pairLockedEdge||0)*100).toFixed(1)+'%');
-  netEdgeEl.style.color = bestEdge>=0.15?'#42d392':bestEdge>=0.08?'#76b7ff':'#f4c96b';
+  if (s.hedgeState === 'single_open') {
+    netEdgeEl.textContent = (s.singleTrailArmed ? 'trail on' : 'trail off') + ' / peak bid ' + (Number(s.singleBestExitBid||0) > 0 ? Number(s.singleBestExitBid).toFixed(3) : '--');
+    netEdgeEl.style.color = s.singleTrailArmed ? '#42d392' : '#f4c96b';
+  } else {
+    const liveEdge = bestEdge > -1 ? bestEdge : NaN;
+    netEdgeEl.textContent = (Number.isFinite(liveEdge) ? ((liveEdge>=0?'+':'')+(liveEdge*100).toFixed(1)+'%') : '--')+' / '+((Number(s.pairLockedEdge||0)>=0?'+':'')+(Number(s.pairLockedEdge||0)*100).toFixed(1)+'%');
+    netEdgeEl.style.color = bestEdge>=0.15?'#42d392':bestEdge>=0.08?'#76b7ff':'#f4c96b';
+  }
   const bsmRejectEl = document.getElementById('h-bsm-reject');
   bsmRejectEl.textContent = s.roundDecision || '--';
   bsmRejectEl.style.color = '#7a8ea6';

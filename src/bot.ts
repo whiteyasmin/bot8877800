@@ -41,7 +41,7 @@ const DUAL_DUMP_MIN_DROP = 0.02;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
 const SINGLE_BUDGET_PCT = 0.08;
 const SINGLE_MAX_SHARES = 35;
-const SINGLE_MAX_EFFECTIVE_COST = 0.10;
+const SINGLE_MAX_EFFECTIVE_COST = 0.15;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
@@ -50,7 +50,7 @@ const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
 const SINGLE_MIN_DROP_FROM_HIGH = 0.08;
 const SINGLE_MIN_DROP_PCT = 0.20;
 const SINGLE_LOW_REBOUND_CONFIRM = 0.01;
-const SINGLE_LOW_CONFIRM_AFTER_MS = 1_500;
+const SINGLE_LOW_CONFIRM_AFTER_MS = 8_000;
 const FIRST_LEG_TREND_WINDOW = 5;
 const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
 const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
@@ -73,6 +73,9 @@ const SINGLE_OPEN_MAX_OTHER_BUFFER = 0.08;
 const SINGLE_REBOUND_TAKE_PROFIT_MIN = 0.03;
 const SINGLE_REBOUND_TAKE_PROFIT_MAX = 0.06;
 const SINGLE_REBOUND_MAX_OTHER_ASK = 0.90;
+const SINGLE_REBOUND_RECLAIM_FROM_LOW = 0.015;
+const SINGLE_TRAIL_RETRACE = 0.05;
+const SINGLE_ROUND_BTC_FILTER_PCT = 0.0025;
 
 type EngineMode = "live" | "paper";
 type PairState = "off" | "watching" | "single_pending" | "single_open" | "pair_pending" | "pair_open" | "done";
@@ -173,6 +176,12 @@ export interface Hedge15mState {
   pairBestObservedCost: number;
   pairLockedEdge: number;
   pairExpectedPayout: number;
+  singleSide: string;
+  singleTrailArmed: boolean;
+  singleBestExitBid: number;
+  singleTakeProfitArm: number;
+  singleTrailRetrace: number;
+  singleMaxHoldSecs: number;
 }
 
 interface PairPositionSnapshot {
@@ -346,6 +355,7 @@ export class Hedge15mEngine {
   private singleEntryBtcPrice = 0;
   private singleEntryEffectiveCost = 0;
   private singleBestExitBid = 0;
+  private singleTrailArmed = false;
 
   private upToken = "";
   private downToken = "";
@@ -660,6 +670,14 @@ export class Hedge15mEngine {
     return side === "up" ? -move : move;
   }
 
+  private getBtcMoveAgainstRoundSide(side: PairLegSide): number {
+    const entry = this.roundStartBtcPrice;
+    const now = getBtcPrice();
+    if (entry <= 0 || now <= 0) return 0;
+    const move = (now - entry) / entry;
+    return side === "up" ? -move : move;
+  }
+
   private isStagedSingleEnabled(): boolean {
     return this.tradingMode === "paper" || STAGED_SINGLE_LIVE_ENABLED;
   }
@@ -912,6 +930,7 @@ export class Hedge15mEngine {
     this.singleEntryBtcPrice = 0;
     this.singleEntryEffectiveCost = 0;
     this.singleBestExitBid = 0;
+    this.singleTrailArmed = false;
   }
 
   private resetRoundState(): void {
@@ -1241,25 +1260,31 @@ export class Hedge15mEngine {
     if (secondsLeft <= SINGLE_ENTRY_MIN_SECS) return false;
     if (this.singleAttemptedThisRound || Date.now() < this.singleRetryAfter) return false;
     if (!this.hasEnoughRoundObservation(secondsLeft)) return false;
+
     const sideLow = this.roundLowestSideCost[quote.side];
     const sideHigh = this.roundHighestSideCost[quote.side];
     const lowAt = this.roundLowestSideCostAt[quote.side];
     const dropAbs = sideHigh > 0 ? sideHigh - quote.effectiveCost : 0;
     const dropPct = sideHigh > 0 ? dropAbs / sideHigh : 0;
     const nearRoundLow = Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + SINGLE_NEAR_LOW_TOLERANCE;
-    const trend = this.getSideCostTrend(quote.side);
-    const flatNearLow = trend.flat && Number.isFinite(sideLow) && quote.effectiveCost <= sideLow + FIRST_LEG_FLAT_NEAR_LOW;
-    const reboundedFromLow = Number.isFinite(sideLow) &&
-      quote.effectiveCost <= sideLow + SINGLE_LOW_REBOUND_CONFIRM &&
+    const lowStable = Number.isFinite(sideLow) &&
+      nearRoundLow &&
       lowAt > 0 &&
       Date.now() - lowAt >= SINGLE_LOW_CONFIRM_AFTER_MS;
-    return nearRoundLow &&
-      (flatNearLow || reboundedFromLow) &&
+    const reclaimedFromLow = Number.isFinite(sideLow) &&
+      quote.effectiveCost >= sideLow + SINGLE_REBOUND_RECLAIM_FROM_LOW &&
+      quote.effectiveCost <= sideLow + 0.03 &&
+      lowAt > 0 &&
+      Date.now() - lowAt >= 2_000;
+    const adverseRoundBtcMove = this.getBtcMoveAgainstRoundSide(quote.side);
+
+    return (lowStable || reclaimedFromLow) &&
       dropAbs >= SINGLE_MIN_DROP_FROM_HIGH &&
       dropPct >= SINGLE_MIN_DROP_PCT &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
       quote.opposite.avgPrice > 0 &&
-      quote.opposite.avgPrice <= SINGLE_REBOUND_MAX_OTHER_ASK;
+      quote.opposite.avgPrice <= SINGLE_REBOUND_MAX_OTHER_ASK &&
+      adverseRoundBtcMove <= SINGLE_ROUND_BTC_FILTER_PCT;
   }
 
   private allowNoExposureRetry(): void {
@@ -1437,16 +1462,15 @@ export class Hedge15mEngine {
     this.pairEntryInFlight = true;
     this.singleAttemptedThisRound = true;
     this.hedgeState = "single_pending";
-      this.status = `单边低价下单中: ${quote.side.toUpperCase()} ${quote.shares}份`;
-    const maxOther = this.getMaxRawOtherPriceForLockedEdge(quote.effectiveCost);
-    this.roundDecision = `单边${quote.side.toUpperCase()} ${quote.effectiveCost.toFixed(3)} 等待补腿 ≤${maxOther.toFixed(3)}`;
+    this.status = `????????: ${quote.side.toUpperCase()} ${quote.shares}?`;
+    this.roundDecision = `???? ${quote.effectiveCost.toFixed(3)}??????`;
 
     try {
       const token = this.getSideToken(rnd, quote.side);
       const fill = await this.executeBuyLeg(trader, token, quote.shares, quote.leg.rawCost, rnd.negRisk);
       if (!fill) {
-        this.status = "单边低价未成交";
-        this.roundDecision = "单边第一腿未成交, 冷却后继续";
+        this.status = "?????????";
+        this.roundDecision = "????????????";
         this.hedgeState = "watching";
         this.allowSingleNoExposureRetry();
         return;
@@ -1470,7 +1494,6 @@ export class Hedge15mEngine {
       this.observedCost = fill.filled > 0 ? this.totalCost / fill.filled : 0;
       this.lockedEdge = 0;
       const filledEffectiveCost = this.observedCost;
-      const filledMaxOther = this.getMaxRawOtherPriceForLockedEdge(filledEffectiveCost);
       this.secondLegMaxPrice = 0;
       this.secondLegTargetPrice = 0;
       this.secondLegLowestPrice = Number.POSITIVE_INFINITY;
@@ -1485,21 +1508,21 @@ export class Hedge15mEngine {
       this.currentNegRisk = rnd.negRisk;
       this.roundStartBtcPrice = this.roundStartBtcPrice > 0 ? this.roundStartBtcPrice : getBtcPrice();
       if (fill.filled < MIN_SHARES) {
-        const abortResult = await this.abortUnhedgedPosition(trader, "单边成交份额不足", "rollback");
+        const abortResult = await this.abortUnhedgedPosition(trader, "????????", "rollback");
         if (abortResult.cleared) {
-          this.status = "单边成交份额不足, 已回滚";
+          this.status = "????????????";
           this.roundDecision = this.status;
           this.hedgeState = "watching";
           this.allowSingleNoExposureRetry();
         } else {
-          this.roundDecision = "单边小额残余未完全回滚, 继续管理";
+          this.roundDecision = "????????????????";
         }
         return;
       }
       this.hedgeState = "single_open";
       this.activeStrategyMode = "extreme-single-reversal";
       this.status = `??????: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}? @${this.observedCost.toFixed(3)}`;
-      this.roundDecision = `?????: ??? ${quote.opposite.avgPrice.toFixed(3)} / ???? ${this.observedCost.toFixed(3)}`;
+      this.roundDecision = `?????: ??? ${quote.opposite.avgPrice.toFixed(3)} / ?? ${this.observedCost.toFixed(3)}`;
       await this.refreshBalance();
       this.persistRuntimeState();
       writeDecisionAudit("single-opened", {
@@ -1509,9 +1532,9 @@ export class Hedge15mEngine {
         filled: fill.filled,
         avgFill: fill.avgPrice,
         effectiveCost: this.observedCost,
-        maxOther: filledMaxOther,
+        oppositeAsk: quote.opposite.avgPrice,
       });
-      logger.info(`SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)}份 cost=${this.observedCost.toFixed(3)} maxOther=${filledMaxOther.toFixed(3)}`);
+      logger.info(`EXTREME SINGLE OPENED: ${quote.side.toUpperCase()} ${fill.filled.toFixed(0)} shares cost=${this.observedCost.toFixed(3)} opposite=${quote.opposite.avgPrice.toFixed(3)}`);
     } finally {
       this.pairEntryInFlight = false;
     }
@@ -1542,7 +1565,7 @@ export class Hedge15mEngine {
     const profitPerShare = exitEffective - entryEffective;
     const takeProfitPerShare = clamp(entryEffective * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX);
     if (profitPerShare >= takeProfitPerShare) {
-      return `????: +${profitPerShare.toFixed(3)}/?`;
+      this.singleTrailArmed = true;
     }
 
     const lossPerShare = entryEffective - exitEffective;
@@ -1554,6 +1577,14 @@ export class Hedge15mEngine {
     const adverseBtcMove = this.getBtcMoveAgainstSingle(side);
     if (adverseBtcMove >= SINGLE_STOP_BTC_MOVE_PCT && lossPerShare > 0) {
       return `????: BTC??${(adverseBtcMove * 100).toFixed(2)}%`;
+    }
+
+    if (this.singleTrailArmed) {
+      const peakExitEffective = this.singleBestExitBid * (1 - TAKER_FEE);
+      const retracePerShare = peakExitEffective - exitEffective;
+      if (retracePerShare >= SINGLE_TRAIL_RETRACE) {
+        return `??????: ?????${retracePerShare.toFixed(3)}/?`;
+      }
     }
 
     return null;
@@ -1590,9 +1621,11 @@ export class Hedge15mEngine {
     const entryEffective = this.singleEntryEffectiveCost || this.getSideAvgFill(side) * (1 + TAKER_FEE);
     const takeProfitPerShare = clamp(entryEffective * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX);
     const stopPerShare = clamp(entryEffective * 0.25, 0.02, SINGLE_STOP_MAX_LOSS_PER_SHARE);
+    const peakExitEffective = this.singleBestExitBid > 0 ? this.singleBestExitBid * (1 - TAKER_FEE) : 0;
     const secondsHeld = Math.floor(heldAgeMs / 1000);
-    this.status = `??????: ${side.toUpperCase()} ${heldShares}? entry ${entryEffective.toFixed(3)} bid ${(bid ?? 0).toFixed(3)}`;
-    this.roundDecision = `??? TP +${takeProfitPerShare.toFixed(3)} / SL -${stopPerShare.toFixed(3)} / ??${secondsHeld}s`;
+    const trailLabel = this.singleTrailArmed ? ` trail on / peak ${peakExitEffective.toFixed(3)}` : ` trail off / arm +${takeProfitPerShare.toFixed(3)}`;
+    this.status = `????: ${side.toUpperCase()} ${heldShares}? entry ${entryEffective.toFixed(3)} bid ${(bid ?? 0).toFixed(3)}${trailLabel}`;
+    this.roundDecision = `SL -${stopPerShare.toFixed(3)} / ???? ${SINGLE_TRAIL_RETRACE.toFixed(3)} / ??${secondsHeld}s`;
   }
 
   private async resolveWinningDirection(): Promise<PairLegSide> {
@@ -1957,6 +1990,12 @@ export class Hedge15mEngine {
       pairBestObservedCost: this.bestObservedCost,
       pairLockedEdge: this.lockedEdge,
       pairExpectedPayout: this.matchedShares,
+      singleSide: this.singleSide || "",
+      singleTrailArmed: this.singleTrailArmed,
+      singleBestExitBid: this.singleBestExitBid,
+      singleTakeProfitArm: clamp((this.singleEntryEffectiveCost || this.observedCost || 0) * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX),
+      singleTrailRetrace: SINGLE_TRAIL_RETRACE,
+      singleMaxHoldSecs: Math.floor(SINGLE_MAX_HOLD_MS / 1000),
     };
   }
 }
