@@ -225,7 +225,7 @@ app.get("/api/download-all", auth, (_req, res) => {
   // ── Logs (last 500 lines) ──
   let logLines = "";
   try {
-    logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8").split("\n").slice(-500).join("\n") : "";
+    logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8") : "";
   } catch { /* empty */ }
 
   // ── Assemble Markdown ──
@@ -277,11 +277,9 @@ app.get("/api/download-logs", auth, (_req, res) => {
     return;
   }
   const raw = fs.readFileSync(logPath, "utf-8");
-  const lines = raw.split("\n");
-  const tail = lines.slice(-1000).join("\n");
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${path.basename(logPath)}"`);
-  res.send(tail);
+  res.send(raw);
 });
 
 app.get("/api/download-history", auth, (_req, res) => {
