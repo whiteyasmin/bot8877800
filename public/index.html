@@ -329,11 +329,33 @@ const API = '';
 let ws = null;
 let auditTimer = null;
 let latestState = null;
+let clockTimer = null;
+let latestStateAt = 0;
 
 function fmtSecs(t) {
   const s = Math.max(0, Math.floor(t || 0));
   const m = Math.floor(s / 60);
   return String(m).padStart(2,'0') + ':' + String(s % 60).padStart(2,'0');
+}
+
+function getLiveState(base) {
+  if (!base) return null;
+  const elapsed = Math.max(0, Math.floor((Date.now() - latestStateAt) / 1000));
+  const state = { ...base };
+  state.secondsLeft = Math.max(0, Number(base.secondsLeft || 0) - elapsed);
+  state.entryWindowLeft = Math.max(0, Number(base.entryWindowLeft || 0) - elapsed);
+  state.nextRoundIn = Math.max(0, Number(base.nextRoundIn || 0) - elapsed);
+  state.roundElapsed = Math.max(0, 900 - state.secondsLeft);
+  state.roundProgressPct = Math.max(0, Math.min(100, (state.roundElapsed / 900) * 100));
+  return state;
+}
+
+function ensureClock() {
+  if (clockTimer) return;
+  clockTimer = setInterval(() => {
+    if (!latestState) return;
+    render(getLiveState(latestState), true);
+  }, 1000);
 }
 
 async function doLogin() {
@@ -351,6 +373,7 @@ document.getElementById('pwd').addEventListener('keydown', e => { if(e.key==='En
 async function doLogout() {
   await fetch(API+'/api/logout',{method:'POST',credentials:'include'}).catch(()=>{});
   if (auditTimer) { clearInterval(auditTimer); auditTimer = null; }
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
   location.reload();
 }
 
@@ -451,8 +474,13 @@ function connectWS() {
   ws.onerror = () => ws.close();
 }
 
-function render(s) {
-  latestState = s;
+function render(s, isTick = false) {
+  if (!isTick) {
+    latestState = s;
+    latestStateAt = Date.now();
+    ensureClock();
+  }
+
   const latColor = ms => ms<=0?'':ms<60?'#42d392':ms<150?'#f4c96b':'#ff6b6b';
   const fmtWs = (conn, age) => conn ? {t:'在线 '+((age||0))+'ms',c:(age||0)<1000?'#42d392':'#f4c96b'} : {t:'断开',c:'#ff6b6b'};
   const fmtBook = (src, fb) => src==='ws'?(fb?'WS/回退':'WS'):src==='http'?'HTTP 回退':'--';
