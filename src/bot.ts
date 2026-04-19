@@ -45,12 +45,12 @@ const SINGLE_MAX_EFFECTIVE_COST = 0.15;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 180;
 const SINGLE_HEDGE_CUTOFF_SECS = 75;
-const SINGLE_MAX_HOLD_MS = 45_000;
+const SINGLE_MAX_HOLD_MS = 60_000;
 const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
 const SINGLE_MIN_DROP_FROM_HIGH = 0.08;
 const SINGLE_MIN_DROP_PCT = 0.20;
 const SINGLE_LOW_REBOUND_CONFIRM = 0.01;
-const SINGLE_LOW_CONFIRM_AFTER_MS = 8_000;
+const SINGLE_LOW_CONFIRM_AFTER_MS = 12_000;
 const FIRST_LEG_TREND_WINDOW = 5;
 const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
 const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
@@ -70,12 +70,14 @@ const SINGLE_STOP_REBOUND_KEEP_PROFIT = 0.015;
 const SINGLE_STOP_BTC_MOVE_PCT = 0.0012;
 const SINGLE_FORCE_HEDGE_AFTER_MS = 30_000;
 const SINGLE_OPEN_MAX_OTHER_BUFFER = 0.08;
-const SINGLE_REBOUND_TAKE_PROFIT_MIN = 0.03;
-const SINGLE_REBOUND_TAKE_PROFIT_MAX = 0.06;
+const SINGLE_REBOUND_TAKE_PROFIT_MIN = 0.04;
+const SINGLE_REBOUND_TAKE_PROFIT_MAX = 0.08;
 const SINGLE_REBOUND_MAX_OTHER_ASK = 0.90;
-const SINGLE_REBOUND_RECLAIM_FROM_LOW = 0.015;
-const SINGLE_TRAIL_RETRACE = 0.05;
+const SINGLE_REBOUND_RECLAIM_FROM_LOW = 0.02;
+const SINGLE_TRAIL_RETRACE = 0.06;
 const SINGLE_ROUND_BTC_FILTER_PCT = 0.0025;
+const SINGLE_TRAIL_ARM_MIN = 0.06;
+const SINGLE_TRAIL_ARM_MAX = 0.12;
 
 type EngineMode = "live" | "paper";
 type PairState = "off" | "watching" | "single_pending" | "single_open" | "pair_pending" | "pair_open" | "done";
@@ -201,6 +203,9 @@ interface PairPositionSnapshot {
   filledAt: number;
   activeStrategyMode?: string;
   singleSide?: PairLegSide | "";
+  singlePartialTaken?: boolean;
+  singleRealizedCost?: number;
+  singleRealizedReturn?: number;
 }
 
 interface BookSnapshot {
@@ -356,6 +361,9 @@ export class Hedge15mEngine {
   private singleEntryEffectiveCost = 0;
   private singleBestExitBid = 0;
   private singleTrailArmed = false;
+  private singlePartialTaken = false;
+  private singleRealizedCost = 0;
+  private singleRealizedReturn = 0;
 
   private upToken = "";
   private downToken = "";
@@ -931,6 +939,9 @@ export class Hedge15mEngine {
     this.singleEntryEffectiveCost = 0;
     this.singleBestExitBid = 0;
     this.singleTrailArmed = false;
+    this.singlePartialTaken = false;
+    this.singleRealizedCost = 0;
+    this.singleRealizedReturn = 0;
   }
 
   private resetRoundState(): void {
@@ -953,6 +964,10 @@ export class Hedge15mEngine {
     this.singleEntryBtcPrice = 0;
     this.singleEntryEffectiveCost = 0;
     this.singleBestExitBid = 0;
+    this.singleTrailArmed = false;
+    this.singlePartialTaken = false;
+    this.singleRealizedCost = 0;
+    this.singleRealizedReturn = 0;
     this.upAsk = 0;
     this.downAsk = 0;
     this.recentPairCosts = [];
@@ -993,6 +1008,9 @@ export class Hedge15mEngine {
       filledAt: this.filledAt,
       activeStrategyMode: this.activeStrategyMode,
       singleSide: this.singleSide || "",
+      singlePartialTaken: this.singlePartialTaken,
+      singleRealizedCost: this.singleRealizedCost,
+      singleRealizedReturn: this.singleRealizedReturn,
     } : null;
     const primarySingleSide = this.singleSide || (this.upHeldShares > this.downHeldShares ? "up" : this.downHeldShares > this.upHeldShares ? "down" : null);
     const primaryShares = primarySingleSide ? this.getHeldShares(primarySingleSide) : this.matchedShares;
@@ -1049,6 +1067,9 @@ export class Hedge15mEngine {
     this.roundStartBtcPrice = pos.roundStartBtcPrice || 0;
     this.filledAt = pos.filledAt || 0;
     this.activeStrategyMode = pos.activeStrategyMode || pos.entrySource || "paired-arb";
+    this.singlePartialTaken = Boolean(pos.singlePartialTaken);
+    this.singleRealizedCost = Number(pos.singleRealizedCost || 0);
+    this.singleRealizedReturn = Number(pos.singleRealizedReturn || 0);
     const restoredSingleSide = (pos.singleSide === "up" || pos.singleSide === "down")
       ? pos.singleSide
       : upHeld > downHeld
@@ -1070,6 +1091,7 @@ export class Hedge15mEngine {
       this.singleEntryEffectiveCost = firstEffectiveCost;
       this.singleEntryBtcPrice = this.roundStartBtcPrice || getBtcPrice();
       this.singleBestExitBid = 0;
+      this.singleTrailArmed = this.singlePartialTaken;
     }
     this.hedgeState = this.singleSide ? "single_open" : "pair_open";
     this.status = this.singleSide
@@ -1138,7 +1160,7 @@ export class Hedge15mEngine {
   }
 
   private async abortUnhedgedPosition(trader: Trader, reason = "未命名回滚", exitType = "rollback"): Promise<UnhedgedAbortResult> {
-    const realizedCost = this.totalCost;
+    const realizedCost = this.totalCost + this.singleRealizedCost;
     const preUpShares = this.upHeldShares;
     const preDownShares = this.downHeldShares;
     const primarySide = preUpShares > 0 && preDownShares <= 0
@@ -1153,7 +1175,7 @@ export class Hedge15mEngine {
         : Math.max(preUpShares, preDownShares);
     const primaryFillPrice = primarySide ? this.getSideAvgFill(primarySide) : this.observedCost;
     const orderId = [this.upOrderId, this.downOrderId].filter(Boolean).join("/");
-    let realizedReturn = 0;
+    let realizedReturn = this.singleRealizedReturn;
 
     if (this.upHeldShares > 0 && this.upToken) {
       const closeUp = await this.executeSellLeg(trader, this.upToken, this.upHeldShares);
@@ -1275,10 +1297,13 @@ export class Hedge15mEngine {
       quote.effectiveCost >= sideLow + SINGLE_REBOUND_RECLAIM_FROM_LOW &&
       quote.effectiveCost <= sideLow + 0.03 &&
       lowAt > 0 &&
-      Date.now() - lowAt >= 2_000;
+      Date.now() - lowAt >= 4_000;
+    const trend = this.getSideCostTrend(quote.side);
+    const lowStableConfirmed = lowStable && !trend.falling && trend.flat;
+    const reboundConfirmed = reclaimedFromLow && !trend.falling;
     const adverseRoundBtcMove = this.getBtcMoveAgainstRoundSide(quote.side);
 
-    return (lowStable || reclaimedFromLow) &&
+    return (lowStableConfirmed || reboundConfirmed) &&
       dropAbs >= SINGLE_MIN_DROP_FROM_HIGH &&
       dropPct >= SINGLE_MIN_DROP_PCT &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
@@ -1502,6 +1527,10 @@ export class Hedge15mEngine {
       this.singleEntryEffectiveCost = filledEffectiveCost;
       this.singleEntryBtcPrice = getBtcPrice();
       this.singleBestExitBid = 0;
+      this.singleTrailArmed = false;
+      this.singlePartialTaken = false;
+      this.singleRealizedCost = 0;
+      this.singleRealizedReturn = 0;
       this.entryReason = `EXTREME SINGLE ${quote.side.toUpperCase()} @${this.observedCost.toFixed(3)} other=${quote.opposite.avgPrice.toFixed(3)}`;
       this.filledAt = Date.now();
       this.currentConditionId = rnd.conditionId;
@@ -1554,6 +1583,49 @@ export class Hedge15mEngine {
     this.persistRuntimeState();
   }
 
+  private getSingleTakeProfitPerShare(entryEffective: number): number {
+    return clamp(entryEffective * 0.5, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX);
+  }
+
+  private getSingleTrailArmPerShare(entryEffective: number): number {
+    return clamp(entryEffective * 0.7, SINGLE_TRAIL_ARM_MIN, SINGLE_TRAIL_ARM_MAX);
+  }
+
+  private async takePartialSingleProfit(trader: Trader, side: PairLegSide): Promise<boolean> {
+    const heldBefore = this.getHeldShares(side);
+    const sellShares = Math.floor(heldBefore / 2);
+    if (sellShares < MIN_SHARES || heldBefore - sellShares < MIN_SHARES) return false;
+
+    const tokenId = side === "up" ? this.upToken : this.downToken;
+    if (!tokenId) return false;
+
+    const fill = await this.executeSellLeg(trader, tokenId, sellShares);
+    if (!fill) return false;
+
+    const openCostBefore = this.totalCost;
+    const costBasis = heldBefore > 0 ? openCostBefore * (fill.filled / heldBefore) : 0;
+    const proceeds = fill.filled * fill.avgPrice * (1 - TAKER_FEE);
+    this.singleRealizedCost += costBasis;
+    this.singleRealizedReturn += proceeds;
+    this.totalCost = Math.max(0, openCostBefore - costBasis);
+
+    if (side === "up") {
+      this.upHeldShares = Math.max(0, this.upHeldShares - fill.filled);
+    } else {
+      this.downHeldShares = Math.max(0, this.downHeldShares - fill.filled);
+    }
+
+    const heldAfter = this.getHeldShares(side);
+    this.observedCost = heldAfter > 0 ? this.totalCost / heldAfter : 0;
+    this.singlePartialTaken = true;
+    this.singleTrailArmed = true;
+    this.singleBestExitBid = fill.avgPrice;
+    await this.refreshBalance();
+    this.persistRuntimeState();
+    logger.info(`EXTREME SINGLE PARTIAL: ${side.toUpperCase()} sold=${fill.filled.toFixed(0)} avg=${fill.avgPrice.toFixed(3)} remaining=${heldAfter.toFixed(0)}`);
+    return true;
+  }
+
   private getSingleStopReason(side: PairLegSide, upBook: BookSnapshot, downBook: BookSnapshot): string | null {
     const bid = this.getExitBidForSide(side, upBook, downBook);
     if (bid == null) return null;
@@ -1563,8 +1635,8 @@ export class Hedge15mEngine {
 
     this.singleBestExitBid = Math.max(this.singleBestExitBid, bid);
     const profitPerShare = exitEffective - entryEffective;
-    const takeProfitPerShare = clamp(entryEffective * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX);
-    if (profitPerShare >= takeProfitPerShare) {
+    const trailArmPerShare = this.getSingleTrailArmPerShare(entryEffective);
+    if (this.singlePartialTaken || profitPerShare >= trailArmPerShare) {
       this.singleTrailArmed = true;
     }
 
@@ -1611,21 +1683,30 @@ export class Hedge15mEngine {
       return;
     }
 
+    const bid = this.getExitBidForSide(side, upBook, downBook);
+    const entryEffective = this.singleEntryEffectiveCost || this.getSideAvgFill(side) * (1 + TAKER_FEE);
+    const takeProfitPerShare = this.getSingleTakeProfitPerShare(entryEffective);
+    const trailArmPerShare = this.getSingleTrailArmPerShare(entryEffective);
+    if (!this.singlePartialTaken && bid != null) {
+      const exitEffective = bid * (1 - TAKER_FEE);
+      const profitPerShare = exitEffective - entryEffective;
+      if (profitPerShare >= takeProfitPerShare) {
+        const partialTaken = await this.takePartialSingleProfit(trader, side);
+        if (partialTaken) return;
+      }
+    }
+
     const exitReason = this.getSingleStopReason(side, upBook, downBook);
     if (exitReason) {
       await this.abortStagedSingle(trader, exitReason);
       return;
     }
 
-    const bid = this.getExitBidForSide(side, upBook, downBook);
-    const entryEffective = this.singleEntryEffectiveCost || this.getSideAvgFill(side) * (1 + TAKER_FEE);
-    const takeProfitPerShare = clamp(entryEffective * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX);
-    const stopPerShare = clamp(entryEffective * 0.25, 0.02, SINGLE_STOP_MAX_LOSS_PER_SHARE);
     const peakExitEffective = this.singleBestExitBid > 0 ? this.singleBestExitBid * (1 - TAKER_FEE) : 0;
     const secondsHeld = Math.floor(heldAgeMs / 1000);
-    const trailLabel = this.singleTrailArmed ? ` trail on / peak ${peakExitEffective.toFixed(3)}` : ` trail off / arm +${takeProfitPerShare.toFixed(3)}`;
+    const trailLabel = this.singleTrailArmed ? ` trail on / peak ${peakExitEffective.toFixed(3)}` : ` trail off / arm +${trailArmPerShare.toFixed(3)}`;
     this.status = `????: ${side.toUpperCase()} ${heldShares}? entry ${entryEffective.toFixed(3)} bid ${(bid ?? 0).toFixed(3)}${trailLabel}`;
-    this.roundDecision = `SL -${stopPerShare.toFixed(3)} / ???? ${SINGLE_TRAIL_RETRACE.toFixed(3)} / ??${secondsHeld}s`;
+    this.roundDecision = `先止盈 +${takeProfitPerShare.toFixed(3)} / 回撤 ${SINGLE_TRAIL_RETRACE.toFixed(3)} / 持有${secondsHeld}s${this.singlePartialTaken ? " / 已止盈半仓" : ""}`;
   }
 
   private async resolveWinningDirection(): Promise<PairLegSide> {
@@ -1993,7 +2074,7 @@ export class Hedge15mEngine {
       singleSide: this.singleSide || "",
       singleTrailArmed: this.singleTrailArmed,
       singleBestExitBid: this.singleBestExitBid,
-      singleTakeProfitArm: clamp((this.singleEntryEffectiveCost || this.observedCost || 0) * 0.4, SINGLE_REBOUND_TAKE_PROFIT_MIN, SINGLE_REBOUND_TAKE_PROFIT_MAX),
+      singleTakeProfitArm: this.getSingleTakeProfitPerShare(this.singleEntryEffectiveCost || this.observedCost || 0),
       singleTrailRetrace: SINGLE_TRAIL_RETRACE,
       singleMaxHoldSecs: Math.floor(SINGLE_MAX_HOLD_MS / 1000),
     };

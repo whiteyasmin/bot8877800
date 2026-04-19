@@ -32,6 +32,9 @@ export interface PaperRuntimeState {
     filledAt: number;
     activeStrategyMode?: string;
     singleSide?: string;
+    singlePartialTaken?: boolean;
+    singleRealizedCost?: number;
+    singleRealizedReturn?: number;
   } | null;
 }
 
@@ -78,6 +81,9 @@ export function loadPaperRuntimeState(): PaperRuntimeState | null {
         filledAt: Number(raw.openPosition.filledAt) || 0,
         activeStrategyMode: String(raw.openPosition.activeStrategyMode || ""),
         singleSide: String(raw.openPosition.singleSide || ""),
+        singlePartialTaken: Boolean(raw.openPosition.singlePartialTaken),
+        singleRealizedCost: Number(raw.openPosition.singleRealizedCost) || 0,
+        singleRealizedReturn: Number(raw.openPosition.singleRealizedReturn) || 0,
       } : null,
     };
   } catch {
