@@ -232,6 +232,8 @@ app.get("/api/download-all", auth, (_req, res) => {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const state = bot.getState();
   const summary = [
+    `- cash: $${state.cashBalance.toFixed(2)}`,
+    `- openPositionValue: $${state.openPositionValue.toFixed(2)}`,
     `- 余额: $${state.balance.toFixed(2)}`,
     `- 总盈亏: $${state.totalProfit.toFixed(2)}`,
     `- 战绩: ${state.wins}W / ${state.losses}L / ${state.skips}S`,

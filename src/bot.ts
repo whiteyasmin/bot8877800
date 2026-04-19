@@ -26,29 +26,29 @@ const TAKER_FEE = 0.02;
 const SIGNAL_SLIPPAGE_BUFFER = 0.01;
 const MAX_SIGNAL_PAIR_COST = 0.985;
 const MAX_EXEC_PAIR_COST = 0.995;
-const MIN_LOCKED_EDGE = 0.015;
+const MIN_LOCKED_EDGE = 0.012;
 const LOWEST_COST_LOOKBACK_MS = 45_000;
 const NEAR_LOW_TOLERANCE = 0.01;
 const SETTLEMENT_SAMPLE_DELAY_MS = 500;
 const HOT_BOOK_MAX_AGE_MS = 350;
 const ENTRY_RETRY_COOLDOWN_MS = 1_500;
-const GLOBAL_LOW_MIN_OBSERVATION_MS = 90_000;
-const GLOBAL_LOW_MIN_ENTRY_SECS = 120;
-const GLOBAL_LOW_PAIR_DROP_MIN = 0.03;
+const GLOBAL_LOW_MIN_OBSERVATION_MS = 60_000;
+const GLOBAL_LOW_MIN_ENTRY_SECS = 90;
+const GLOBAL_LOW_PAIR_DROP_MIN = 0.025;
 const DUAL_DUMP_NEAR_LOW_TOLERANCE = 0.01;
 const DUAL_SIDE_NEAR_LOW_TOLERANCE = 0.015;
-const DUAL_DUMP_MIN_DROP = 0.025;
+const DUAL_DUMP_MIN_DROP = 0.02;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
-const SINGLE_BUDGET_PCT = 0.12;
-const SINGLE_MAX_SHARES = 60;
+const SINGLE_BUDGET_PCT = 0.16;
+const SINGLE_MAX_SHARES = 80;
 const SINGLE_MAX_EFFECTIVE_COST = 0.30;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
-const SINGLE_ENTRY_MIN_SECS = 180;
-const SINGLE_HEDGE_CUTOFF_SECS = 75;
+const SINGLE_ENTRY_MIN_SECS = 150;
+const SINGLE_HEDGE_CUTOFF_SECS = 90;
 const SINGLE_MAX_HOLD_MS = 90_000;
 const SINGLE_NEAR_LOW_TOLERANCE = 0.01;
-const SINGLE_MIN_DROP_FROM_HIGH = 0.08;
-const SINGLE_MIN_DROP_PCT = 0.18;
+const SINGLE_MIN_DROP_FROM_HIGH = 0.10;
+const SINGLE_MIN_DROP_PCT = 0.22;
 const SINGLE_LOW_REBOUND_CONFIRM = 0.01;
 const SINGLE_LOW_CONFIRM_AFTER_MS = 1_500;
 const FIRST_LEG_TREND_WINDOW = 5;
@@ -56,7 +56,7 @@ const FIRST_LEG_DOWNTREND_MIN_DROP = 0.01;
 const FIRST_LEG_DOWNTREND_LOW_PAD = 0.015;
 const FIRST_LEG_FLAT_RANGE = 0.005;
 const FIRST_LEG_FLAT_NEAR_LOW = 0.01;
-const SECOND_LEG_TARGET_DISCOUNT = 0.03;
+const SECOND_LEG_TARGET_DISCOUNT = 0.01;
 const SECOND_LEG_NEAR_LOW_TOLERANCE = 0.01;
 const SECOND_LEG_REBOUND_FROM_LOW = 0.02;
 const SECOND_LEG_TREND_WINDOW = 5;
@@ -64,10 +64,12 @@ const SECOND_LEG_DOWNTREND_MIN_DROP = 0.01;
 const SECOND_LEG_DOWNTREND_TARGET_PAD = 0.015;
 const SECOND_LEG_FLAT_RANGE = 0.005;
 const SECOND_LEG_FLAT_NEAR_LOW = 0.01;
-const SINGLE_STOP_MAX_LOSS_PER_SHARE = 0.045;
-const SINGLE_STOP_MAX_LOSS_PCT = 0.18;
+const SINGLE_STOP_MAX_LOSS_PER_SHARE = 0.03;
+const SINGLE_STOP_MAX_LOSS_PCT = 0.12;
 const SINGLE_STOP_REBOUND_KEEP_PROFIT = 0.015;
 const SINGLE_STOP_BTC_MOVE_PCT = 0.0012;
+const SINGLE_FORCE_HEDGE_AFTER_MS = 20_000;
+const SINGLE_OPEN_MAX_OTHER_BUFFER = 0.04;
 
 type EngineMode = "live" | "paper";
 type PairState = "off" | "watching" | "single_pending" | "single_open" | "pair_pending" | "pair_open" | "done";
@@ -133,6 +135,9 @@ export interface Hedge15mState {
   upAsk: number;
   downAsk: number;
   balance: number;
+  cashBalance: number;
+  equity: number;
+  openPositionValue: number;
   totalProfit: number;
   wins: number;
   losses: number;
@@ -377,12 +382,21 @@ export class Hedge15mEngine {
     try {
       if (!fs.existsSync(this.historyFile)) {
         this.history = [];
+        this.totalProfit = 0;
+        this.wins = 0;
+        this.losses = 0;
         return;
       }
       const raw = JSON.parse(fs.readFileSync(this.historyFile, "utf8"));
       this.history = Array.isArray(raw?.history) ? raw.history as HedgeHistoryEntry[] : [];
+      this.totalProfit = this.history.length > 0 ? Number(this.history[this.history.length - 1]?.cumProfit || 0) : 0;
+      this.wins = this.history.filter((item) => item.result === "WIN").length;
+      this.losses = this.history.filter((item) => item.result === "LOSS").length;
     } catch {
       this.history = [];
+      this.totalProfit = 0;
+      this.wins = 0;
+      this.losses = 0;
     }
   }
 
@@ -395,6 +409,40 @@ export class Hedge15mEngine {
   private getSessionROI(): number {
     if (this.initialBankroll <= 0) return 0;
     return (this.sessionProfit / this.initialBankroll) * 100;
+  }
+
+  private getSizingMultiplier(): number {
+    const base = this.initialBankroll > 0 ? this.initialBankroll : this.balance;
+    const bankroll = Math.max(this.balance, base);
+    if (base <= 0 || bankroll <= 0) return 1;
+    // Use sqrt scaling so compounding increases size smoothly instead of jumping too aggressively.
+    return clamp(Math.sqrt(bankroll / base), 0.85, 2.5);
+  }
+
+  private getDynamicPairShareCap(): number {
+    return Math.max(MIN_SHARES, Math.floor(MAX_SHARES * this.getSizingMultiplier()));
+  }
+
+  private getDynamicSingleShareCap(): number {
+    return Math.max(MIN_SHARES, Math.floor(SINGLE_MAX_SHARES * this.getSizingMultiplier()));
+  }
+
+  private estimateTokenExitValue(tokenId: string, shares: number, avgFill: number): number {
+    if (shares <= 0) return 0;
+    const snapshot = tokenId && this.trader ? this.trader.peekBestPrices(tokenId, 2_000, 2_000) : null;
+    const bid = snapshot?.bid ?? null;
+    const mark = bid != null && bid > 0 ? bid * (1 - TAKER_FEE) : avgFill * (1 - TAKER_FEE);
+    return Math.max(0, shares * Math.max(0, mark));
+  }
+
+  private getOpenPositionValue(): number {
+    if (this.matchedShares <= 0 && this.upHeldShares <= 0 && this.downHeldShares <= 0) return 0;
+    const lockedValue = Math.max(0, this.matchedShares);
+    const extraUp = Math.max(0, this.upHeldShares - this.matchedShares);
+    const extraDown = Math.max(0, this.downHeldShares - this.matchedShares);
+    return lockedValue +
+      this.estimateTokenExitValue(this.upToken, extraUp, this.upAvgFill) +
+      this.estimateTokenExitValue(this.downToken, extraDown, this.downAvgFill);
   }
 
   private getRolling4hPnL(): number {
@@ -451,7 +499,7 @@ export class Hedge15mEngine {
   private buildExecutablePairQuote(upBook: BookSnapshot, downBook: BookSnapshot): PairQuote | null {
     const upDepth = this.getAskLevels(upBook).reduce((sum, level) => sum + level.size, 0);
     const downDepth = this.getAskLevels(downBook).reduce((sum, level) => sum + level.size, 0);
-    const maxDepthShares = Math.floor(Math.min(upDepth, downDepth, MAX_SHARES));
+    const maxDepthShares = Math.floor(Math.min(upDepth, downDepth, this.getDynamicPairShareCap()));
     if (maxDepthShares < MIN_SHARES) return null;
 
     let monitorQuote: PairQuote | null = null;
@@ -544,7 +592,7 @@ export class Hedge15mEngine {
     const oppositeBook = this.getSideBook(this.getOppositeSide(side), upBook, downBook);
     const maxDepthShares = Math.floor(Math.min(
       this.getAskLevels(legBook).reduce((sum, level) => sum + level.size, 0),
-      SINGLE_MAX_SHARES,
+      this.getDynamicSingleShareCap(),
     ));
     if (maxDepthShares < MIN_SHARES) return null;
 
@@ -881,6 +929,9 @@ export class Hedge15mEngine {
     this.trader?.setPaperBalance(this.balance);
     this.initialBankroll = state.initialBankroll > 0 ? state.initialBankroll : this.initialBankroll;
     this.sessionProfit = state.sessionProfit;
+    if (this.totalProfit === 0 && this.history.length > 0) {
+      this.totalProfit = Number(this.history[this.history.length - 1]?.cumProfit || 0);
+    }
     this.rollingPnL = state.rollingPnL || [];
     const pos = state.openPosition;
     if (!pos) return;
@@ -1093,7 +1144,7 @@ export class Hedge15mEngine {
       dropPct >= SINGLE_MIN_DROP_PCT &&
       quote.effectiveCost <= SINGLE_MAX_EFFECTIVE_COST &&
       maxOther > 0 &&
-      quote.opposite.avgPrice <= maxOther + 0.08;
+      quote.opposite.avgPrice <= maxOther + SINGLE_OPEN_MAX_OTHER_BUFFER;
   }
 
   private allowNoExposureRetry(): void {
@@ -1454,6 +1505,7 @@ export class Hedge15mEngine {
       oppositeQuote.avgPrice <= this.secondLegLowestPrice + SECOND_LEG_FLAT_NEAR_LOW &&
       oppositeQuote.avgPrice <= maxOther;
     const canLock = oppositeQuote.avgPrice <= maxOther && projectedEdge >= MIN_LOCKED_EDGE;
+    const forceHedge = heldAgeMs >= SINGLE_FORCE_HEDGE_AFTER_MS && canLock;
     this.signalCost = projectedCost;
     const trendLabel = lowFlat ? " flat-low" : trend.falling ? " falling" : reboundedFromLow ? " rebound" : "";
     this.status = `单边${side.toUpperCase()}等补${oppositeSide.toUpperCase()}: ask ${oppositeQuote.avgPrice.toFixed(3)} target ${targetOther.toFixed(3)} max ${maxOther.toFixed(3)}${trendLabel}`;
@@ -1463,7 +1515,7 @@ export class Hedge15mEngine {
       if (expired) await this.abortStagedSingle(trader, "未等到可锁利对冲");
       return;
     }
-    if (!hitTarget && !lowFlat && !fallingIntoTarget && !reboundedFromLow && !expired) {
+    if (!hitTarget && !lowFlat && !fallingIntoTarget && !reboundedFromLow && !forceHedge && !expired) {
       return;
     }
 
@@ -1636,6 +1688,7 @@ export class Hedge15mEngine {
 
   private async mainLoop(runId: number): Promise<void> {
     let currentRoundId = "";
+    let currentRoundStartSec = 0;
 
     while (this.isActiveRun(runId)) {
       try {
@@ -1664,13 +1717,38 @@ export class Hedge15mEngine {
         this.currentNegRisk = round.negRisk;
         this.secondsLeft = round.secondsLeft;
         setRoundSecsLeft(round.secondsLeft);
+        const observedRoundStartSec = Math.floor(Date.now() / 1000) - (ROUND_DURATION - Math.floor(round.secondsLeft));
+
+        if (currentRoundStartSec > 0 && observedRoundStartSec + 1 < currentRoundStartSec) {
+          logger.warn(`stale round ignored: ${round.question} start=${observedRoundStartSec} current=${currentRoundStartSec}`);
+          await sleep(LOOP_SLEEP_MS);
+          continue;
+        }
 
         if (currentRoundId && round.conditionId !== currentRoundId && (this.matchedShares > 0 || this.upHeldShares > 0 || this.downHeldShares > 0)) {
-          await this.settlePair();
+          if (this.matchedShares > 0) {
+            await this.settlePair();
+          } else if (this.trader) {
+            writeDecisionAudit("single-force-exit", {
+              conditionId: currentRoundId,
+              upHeldShares: this.upHeldShares,
+              downHeldShares: this.downHeldShares,
+              totalCost: this.totalCost,
+            });
+            await this.abortStagedSingle(this.trader, "跨轮禁止裸仓结算");
+            if (this.upHeldShares > 0 || this.downHeldShares > 0) {
+              this.status = "跨轮清理未完成，暂停进入新一轮";
+              this.roundDecision = this.status;
+              this.persistRuntimeState();
+              await sleep(1000);
+              continue;
+            }
+          }
         }
 
         if (round.conditionId !== currentRoundId) {
           currentRoundId = round.conditionId;
+          currentRoundStartSec = observedRoundStartSec;
           this.totalRounds += 1;
           this.roundStartBtcPrice = getBtcPrice();
           setRoundStartPrice(this.roundStartBtcPrice);
@@ -1808,6 +1886,8 @@ export class Hedge15mEngine {
     const secondsLeft = Math.max(0, this.secondsLeft);
     const roundElapsed = clamp(ROUND_DURATION - secondsLeft, 0, ROUND_DURATION);
     const lat = getLatencySnapshot();
+    const openPositionValue = this.getOpenPositionValue();
+    const equity = this.balance + openPositionValue;
 
     return {
       botRunning: this.running,
@@ -1825,7 +1905,10 @@ export class Hedge15mEngine {
       currentMarket: this.currentMarket,
       upAsk: this.upAsk,
       downAsk: this.downAsk,
-      balance: this.balance,
+      balance: equity,
+      cashBalance: this.balance,
+      equity,
+      openPositionValue,
       totalProfit: this.totalProfit,
       wins: this.wins,
       losses: this.losses,
