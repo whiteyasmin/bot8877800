@@ -39,8 +39,8 @@ const DUAL_DUMP_NEAR_LOW_TOLERANCE = 0.01;
 const DUAL_SIDE_NEAR_LOW_TOLERANCE = 0.015;
 const DUAL_DUMP_MIN_DROP = 0.02;
 const STAGED_SINGLE_LIVE_ENABLED = process.env.ENABLE_STAGED_SINGLE !== "0";
-const SINGLE_BUDGET_PCT = 0.16;
-const SINGLE_MAX_SHARES = 80;
+const SINGLE_BUDGET_PCT = 0.14;
+const SINGLE_MAX_SHARES = 70;
 const SINGLE_MAX_EFFECTIVE_COST = 0.30;
 const SINGLE_MAX_PROJECTED_PAIR_COST = 1 - MIN_LOCKED_EDGE;
 const SINGLE_ENTRY_MIN_SECS = 150;
@@ -204,6 +204,16 @@ interface BookSnapshot {
 interface LegFillResult {
   filled: number;
   avgPrice: number;
+  orderId: string;
+}
+
+interface UnhedgedAbortResult {
+  cleared: boolean;
+  realizedCost: number;
+  realizedReturn: number;
+  primarySide: PairLegSide | null;
+  primaryShares: number;
+  primaryFillPrice: number;
   orderId: string;
 }
 
@@ -457,6 +467,67 @@ export class Hedge15mEngine {
   private recordRollingPnL(profit: number): void {
     this.rollingPnL.push({ ts: Date.now(), profit });
     this.getRolling4hPnL();
+  }
+
+  private recordUnhedgedExit(result: UnhedgedAbortResult, reason: string, exitType: string): void {
+    if (!result.cleared || result.realizedCost <= 0) return;
+
+    const profit = result.realizedReturn - result.realizedCost;
+    const outcome = profit >= 0 ? "WIN" : "LOSS";
+    if (outcome === "WIN") this.wins += 1;
+    else this.losses += 1;
+    this.totalProfit += profit;
+    this.sessionProfit += profit;
+    this.recordRollingPnL(profit);
+
+    const entryEffectiveCost = result.primaryShares > 0 ? result.realizedCost / result.primaryShares : 0;
+    const entryEffectiveEdge = result.primaryShares > 0 ? profit / result.primaryShares : 0;
+    this.history.push({
+      time: timeStr(),
+      result: outcome,
+      leg1Dir: result.primarySide ? result.primarySide.toUpperCase() : "PAIR",
+      leg1Price: round2(this.signalCost),
+      totalCost: round2(result.realizedCost),
+      profit: round2(profit),
+      cumProfit: round2(this.totalProfit),
+      exitType,
+      exitReason: reason,
+      leg1Shares: result.primaryShares,
+      leg1FillPrice: round2(result.primaryFillPrice),
+      orderId: result.orderId,
+      estimated: false,
+      profitBreakdown: `回收$${result.realizedReturn.toFixed(2)} - 成本$${result.realizedCost.toFixed(2)} = ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)}`,
+      entrySource: this.activeStrategyMode,
+      entryTrendBias: "flat",
+      entrySecondsLeft: Math.floor(this.secondsLeft),
+      entryWinRate: 0,
+      entryBsFair: 1,
+      entryEffectiveCost: round2(entryEffectiveCost),
+      entryEffectiveEdge,
+      entryEdgeTier: this.getEntryEdgeTier(entryEffectiveEdge),
+      pairMatchedShares: 0,
+      upFilledShares: this.upHeldShares,
+      downFilledShares: this.downHeldShares,
+      upFillPrice: this.upAvgFill,
+      downFillPrice: this.downAvgFill,
+      expectedPayout: round2(result.realizedReturn),
+      pairSignalCost: round2(this.signalCost),
+      pairObservedCost: round2(this.observedCost),
+    });
+    if (this.history.length > 200) this.history.shift();
+    this.saveHistory();
+
+    writeDecisionAudit("single-aborted", {
+      conditionId: this.currentConditionId,
+      reason,
+      exitType,
+      primarySide: result.primarySide,
+      shares: result.primaryShares,
+      totalCost: result.realizedCost,
+      returnVal: result.realizedReturn,
+      profit,
+      postExitBalance: this.balance,
+    });
   }
 
   private calcSignalPairCost(upAsk: number, downAsk: number): number {
@@ -1044,18 +1115,39 @@ export class Hedge15mEngine {
     this.lockedEdge = this.matchedShares > 0 ? (this.matchedShares - this.totalCost) / this.matchedShares : 0;
   }
 
-  private async abortUnhedgedPosition(trader: Trader): Promise<boolean> {
+  private async abortUnhedgedPosition(trader: Trader, reason = "未命名回滚", exitType = "rollback"): Promise<UnhedgedAbortResult> {
+    const realizedCost = this.totalCost;
+    const preUpShares = this.upHeldShares;
+    const preDownShares = this.downHeldShares;
+    const primarySide = preUpShares > 0 && preDownShares <= 0
+      ? "up"
+      : preDownShares > 0 && preUpShares <= 0
+        ? "down"
+        : this.singleSide;
+    const primaryShares = primarySide === "up"
+      ? preUpShares
+      : primarySide === "down"
+        ? preDownShares
+        : Math.max(preUpShares, preDownShares);
+    const primaryFillPrice = primarySide ? this.getSideAvgFill(primarySide) : this.observedCost;
+    const orderId = [this.upOrderId, this.downOrderId].filter(Boolean).join("/");
+    let realizedReturn = 0;
+
     if (this.upHeldShares > 0 && this.upToken) {
       const closeUp = await this.executeSellLeg(trader, this.upToken, this.upHeldShares);
       if (closeUp) {
-        this.totalCost -= closeUp.filled * closeUp.avgPrice * (1 - TAKER_FEE);
+        const proceeds = closeUp.filled * closeUp.avgPrice * (1 - TAKER_FEE);
+        realizedReturn += proceeds;
+        this.totalCost -= proceeds;
         this.upHeldShares = Math.max(0, this.upHeldShares - closeUp.filled);
       }
     }
     if (this.downHeldShares > 0 && this.downToken) {
       const closeDown = await this.executeSellLeg(trader, this.downToken, this.downHeldShares);
       if (closeDown) {
-        this.totalCost -= closeDown.filled * closeDown.avgPrice * (1 - TAKER_FEE);
+        const proceeds = closeDown.filled * closeDown.avgPrice * (1 - TAKER_FEE);
+        realizedReturn += proceeds;
+        this.totalCost -= proceeds;
         this.downHeldShares = Math.max(0, this.downHeldShares - closeDown.filled);
       }
     }
@@ -1067,8 +1159,18 @@ export class Hedge15mEngine {
     const residualUp = this.upHeldShares;
     const residualDown = this.downHeldShares;
     if (residualUp <= 0.0001 && residualDown <= 0.0001) {
+      const result: UnhedgedAbortResult = {
+        cleared: true,
+        realizedCost,
+        realizedReturn,
+        primarySide,
+        primaryShares,
+        primaryFillPrice,
+        orderId,
+      };
+      this.recordUnhedgedExit(result, reason, exitType);
       this.clearOpenPosition();
-      return true;
+      return result;
     }
 
     this.matchedShares = Math.min(residualUp, residualDown);
@@ -1091,7 +1193,15 @@ export class Hedge15mEngine {
     }
     logger.warn(`abort rollback left residual: up=${residualUp.toFixed(4)} down=${residualDown.toFixed(4)}`);
     this.persistRuntimeState();
-    return false;
+    return {
+      cleared: false,
+      realizedCost,
+      realizedReturn,
+      primarySide,
+      primaryShares,
+      primaryFillPrice,
+      orderId,
+    };
   }
 
   private shouldOpenPair(pairQuote: PairQuote, secondsLeft: number): boolean {
@@ -1216,9 +1326,9 @@ export class Hedge15mEngine {
       const secondShares = Math.floor(Math.min(firstFill.filled, targetShares));
       const secondQuote = secondBook && secondShares >= MIN_SHARES ? this.quoteBuyShares(secondBook, secondShares) : null;
       if (!secondAsk || !secondQuote) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "第二腿盘口丢失, 已回滚" : "第二腿盘口丢失, 回滚残余继续管理";
-        if (cleared) {
+        const abortResult = await this.abortUnhedgedPosition(trader, "第二腿盘口丢失", "rollback");
+        this.roundDecision = abortResult.cleared ? "第二腿盘口丢失, 已回滚" : "第二腿盘口丢失, 回滚残余继续管理";
+        if (abortResult.cleared) {
           this.status = "配对失败, 已回滚";
           this.hedgeState = "watching";
         }
@@ -1228,11 +1338,11 @@ export class Hedge15mEngine {
       const projectedRawCost = (firstFill.avgPrice * secondShares) + secondQuote.rawCost;
       const projectedCost = ((projectedRawCost * (1 + TAKER_FEE)) / secondShares) + SIGNAL_SLIPPAGE_BUFFER;
       if (projectedCost > MAX_EXEC_PAIR_COST) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared
+        const abortResult = await this.abortUnhedgedPosition(trader, `第二腿追价过高 ${projectedCost.toFixed(3)}`, "rollback");
+        this.roundDecision = abortResult.cleared
           ? `第二腿追价过高 ${projectedCost.toFixed(3)}, 已回滚`
           : `第二腿追价过高 ${projectedCost.toFixed(3)}, 回滚残余继续管理`;
-        if (cleared) {
+        if (abortResult.cleared) {
           this.status = "配对失败, 已回滚";
           this.hedgeState = "watching";
         }
@@ -1241,9 +1351,9 @@ export class Hedge15mEngine {
 
       const secondFill = await this.executeBuyLeg(trader, secondToken, secondShares, secondQuote.rawCost, rnd.negRisk);
       if (!secondFill) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "第二腿未成交, 已回滚" : "第二腿未成交, 回滚残余继续管理";
-        if (cleared) {
+        const abortResult = await this.abortUnhedgedPosition(trader, "第二腿未成交", "rollback");
+        this.roundDecision = abortResult.cleared ? "第二腿未成交, 已回滚" : "第二腿未成交, 回滚残余继续管理";
+        if (abortResult.cleared) {
           this.status = "配对失败, 已回滚";
           this.hedgeState = "watching";
         }
@@ -1270,20 +1380,20 @@ export class Hedge15mEngine {
 
       await this.flattenResidual(trader);
       if (this.matchedShares < MIN_SHARES) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "配对份额不足, 已回滚" : "配对份额不足, 回滚残余继续管理";
-        if (cleared) {
+        const abortResult = await this.abortUnhedgedPosition(trader, "配对份额不足", "rollback");
+        this.roundDecision = abortResult.cleared ? "配对份额不足, 已回滚" : "配对份额不足, 回滚残余继续管理";
+        if (abortResult.cleared) {
           this.status = "配对失败, 已回滚";
           this.hedgeState = "watching";
         }
         return;
       }
       if (this.lockedEdge <= 0) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared
+        const abortResult = await this.abortUnhedgedPosition(trader, `实际成本无利润 ${this.observedCost.toFixed(3)}`, "rollback");
+        this.roundDecision = abortResult.cleared
           ? `实际成本无利润 ${this.observedCost.toFixed(3)}, 已回滚`
           : `实际成本无利润 ${this.observedCost.toFixed(3)}, 回滚残余继续管理`;
-        if (cleared) {
+        if (abortResult.cleared) {
           this.status = "配对实际无edge, 已回滚";
           this.hedgeState = "watching";
         }
@@ -1374,8 +1484,8 @@ export class Hedge15mEngine {
       this.currentNegRisk = rnd.negRisk;
       this.roundStartBtcPrice = this.roundStartBtcPrice > 0 ? this.roundStartBtcPrice : getBtcPrice();
       if (fill.filled < MIN_SHARES) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        if (cleared) {
+        const abortResult = await this.abortUnhedgedPosition(trader, "单边成交份额不足", "rollback");
+        if (abortResult.cleared) {
           this.status = "单边成交份额不足, 已回滚";
           this.roundDecision = this.status;
           this.hedgeState = "watching";
@@ -1407,8 +1517,8 @@ export class Hedge15mEngine {
   }
 
   private async abortStagedSingle(trader: Trader, reason: string): Promise<void> {
-    const cleared = await this.abortUnhedgedPosition(trader);
-    if (cleared) {
+    const abortResult = await this.abortUnhedgedPosition(trader, reason, "stop");
+    if (abortResult.cleared) {
       this.hedgeState = "watching";
       this.activeStrategyMode = "paired-arb";
       this.status = `单边已回滚: ${reason}`;
@@ -1553,9 +1663,9 @@ export class Hedge15mEngine {
       await this.flattenResidual(trader);
 
       if (this.matchedShares < MIN_SHARES || this.lockedEdge <= 0) {
-        const cleared = await this.abortUnhedgedPosition(trader);
-        this.roundDecision = cleared ? "单边补腿后无有效edge, 已回滚" : "单边补腿后无有效edge, 回滚残余继续管理";
-        if (cleared) {
+        const abortResult = await this.abortUnhedgedPosition(trader, "单边补腿后无有效edge", "rollback");
+        this.roundDecision = abortResult.cleared ? "单边补腿后无有效edge, 已回滚" : "单边补腿后无有效edge, 回滚残余继续管理";
+        if (abortResult.cleared) {
           this.hedgeState = "watching";
           this.status = "单边对冲失败, 已回滚";
         }
