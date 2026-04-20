@@ -55,6 +55,9 @@ const DOJI_MAX_BUDGET_PCT = 0.08;
 const NEAR_DOJI_MAX_BUDGET_PCT = 0.12;
 const DOJI_HIGH_ASK_CUTOFF = 0.20;
 const DOJI_HIGH_ASK_MAX_BUDGET_PCT = 0.08;
+const EARLY_DOJI_SECS_LEFT = 600;
+const EARLY_DOJI_MIN_DROP = 0.15;
+const EARLY_DOJI_MAX_BUDGET_PCT = 0.05;
 const EARLY_SMALL_EDGE_SECS_LEFT = 780;
 const EARLY_SMALL_EDGE_MIN_EDGE = MISPRICING_NORMAL_EDGE;
 const EARLY_COUNTER_MOMENTUM_MIN_EDGE = MISPRICING_FAST_LANE_EDGE;
@@ -1873,6 +1876,20 @@ export class Hedge15mEngine {
     const bsWinRate = bsEntry.fairKelly;
     const bsEdgeNet = bsEntry.effectiveEdge;
     const dojiRegime = bsEntry.lnMoneyness < DOJI_LN_MONEYNESS ? "doji" : bsEntry.lnMoneyness < NEAR_DOJI_LN_MONEYNESS ? "near-doji" : "directional";
+    if (
+      strategyMode === "mispricing" &&
+      dojiRegime === "doji" &&
+      rnd.secondsLeft > EARLY_DOJI_SECS_LEFT &&
+      this.currentDumpDrop < EARLY_DOJI_MIN_DROP
+    ) {
+      this.trackRoundRejectReason(`early-doji-weak-dump: drop ${(this.currentDumpDrop * 100).toFixed(1)}% < ${(EARLY_DOJI_MIN_DROP * 100).toFixed(0)}%`);
+      const skipKey = `early-doji:${dir}:${Math.floor(rnd.secondsLeft)}:${Math.floor(this.currentDumpDrop * 1000)}`;
+      if (skipKey !== this.lastSignalSkipKey) {
+        this.lastSignalSkipKey = skipKey;
+        logger.info(`HEDGE15M MISPRICING SKIP: early doji ${Math.floor(rnd.secondsLeft)}s drop ${(this.currentDumpDrop * 100).toFixed(1)}% < ${(EARLY_DOJI_MIN_DROP * 100).toFixed(0)}% edge ${(bsEdgeNet * 100).toFixed(1)}%`);
+      }
+      return;
+    }
     if (strategyMode === "mispricing" && rnd.secondsLeft > EARLY_SMALL_EDGE_SECS_LEFT) {
       const shortMomentum = getRecentMomentum(MOMENTUM_WINDOW_SEC);
       const counterShortMomentum = (dir === "up" && shortMomentum < 0) || (dir === "down" && shortMomentum > 0);
@@ -2017,6 +2034,9 @@ export class Hedge15mEngine {
     }
     if (strategyMode === "mispricing" && dojiRegime !== "directional") {
       let dojiCap = dojiRegime === "doji" ? DOJI_MAX_BUDGET_PCT : NEAR_DOJI_MAX_BUDGET_PCT;
+      if (dojiRegime === "doji" && rnd.secondsLeft > EARLY_DOJI_SECS_LEFT) {
+        dojiCap = Math.min(dojiCap, EARLY_DOJI_MAX_BUDGET_PCT);
+      }
       if (askPrice > DOJI_HIGH_ASK_CUTOFF) {
         dojiCap = Math.min(dojiCap, DOJI_HIGH_ASK_MAX_BUDGET_PCT);
       }
