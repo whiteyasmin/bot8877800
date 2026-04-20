@@ -109,6 +109,7 @@ const SUM_DIVERGENCE_RELAXED = 1.05;        // 大dump(≥12%)时放宽sum上限
 const SUM_DIVERGENCE_MIN = 0.85;            // 入场时 upAsk+downAsk < 此值 → 方向性强、砸盘更可信
 const DUMP_CONFIRM_CYCLES = 1;              // 连续 N 个循环看到 dump 才触发入场 (1: dumpThreshold已过滤噪声, 无需多次确认)
 const MIN_ENTRY_ELAPSED = 30;               // 回合开始至少30s后才允许反应式入场 (30s数据已足够稳定)
+const BOOT_ROUND_MAX_ELAPSED = MIN_ENTRY_ELAPSED; // 启动时只允许接入刚开局的回合, 禁止局中启动入仓
 const TREND_BUDGET_BOOST = 0.03;            // 趋势一致在Kelly基础上再加3%
 const TREND_BUDGET_CUT = 0.02;              // 方向中性时在Kelly基础上减2%
 const MIN_NET_EDGE = 0.05;                  // net edge <8% 不做
@@ -1370,6 +1371,7 @@ export class Hedge15mEngine {
   private async mainLoop(runId: number): Promise<void> {
     const trader = this.trader!;
     let curCid = "";
+    let firstObservedRound = true;
 
     while (this.isActiveRun(runId)) {
       try {
@@ -1398,6 +1400,8 @@ export class Hedge15mEngine {
 
         // New round
         if (cid !== curCid) {
+          const isBootRound = firstObservedRound;
+          firstObservedRound = false;
           if (curCid && this.totalCost > 0) {
             await this.settleHedge();
           }
@@ -1426,6 +1430,12 @@ export class Hedge15mEngine {
             this.skips++;
             logger.warn(`CAPITAL GUARD: session loss $${this.sessionProfit.toFixed(2)} exceeds ${(MAX_SESSION_LOSS_PCT * 100).toFixed(0)}% of bankroll $${this.initialBankroll.toFixed(2)}, skipping`);
             this.writeRoundAudit("round-skip-capital", { reason: "session-loss-limit", sessionProfit: this.sessionProfit, initialBankroll: this.initialBankroll });
+          } else if (isBootRound && (ROUND_DURATION - secs) > BOOT_ROUND_MAX_ELAPSED) {
+            this.hedgeState = "done";
+            this.status = `跳过: 局中启动 ${Math.floor(ROUND_DURATION - secs)}s > ${BOOT_ROUND_MAX_ELAPSED}s`;
+            this.skips++;
+            logger.info(`HEDGE15M SKIP BOOT MID-ROUND: elapsed ${Math.floor(ROUND_DURATION - secs)}s > ${BOOT_ROUND_MAX_ELAPSED}s, waiting next round`);
+            this.writeRoundAudit("round-skip-boot-midround", { elapsed: ROUND_DURATION - secs, secondsLeft: secs, maxBootElapsed: BOOT_ROUND_MAX_ELAPSED, negRisk: this.negRisk });
           } else if (this.consecutiveLosses >= CONSECUTIVE_LOSS_PAUSE) {
             // 连亏≥5: 不再完全跳过, 而是以最低仓位(×0.4)继续交易 — JSONL数据证明低价入场长期EV+
             const cLossScale = Math.max(0.4, Math.pow(0.85, this.consecutiveLosses));
