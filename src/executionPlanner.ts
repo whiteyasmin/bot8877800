@@ -28,7 +28,13 @@ export function planHedgeEntry(input: HedgeEntryPlanInput): EntryPlanResult {
   if (askPrice < minEntryAsk) {
     return { allowed: false, reason: `ask=${askPrice.toFixed(2)} < MIN_ENTRY_ASK=${minEntryAsk}` };
   }
-  // 逆势判断统一由 buyLeg1 的 isContraTrend gate 处理 (CONTRA_TREND_EXTRA_EDGE + CONTRA_TREND_SCALE)
-  // 高 edge 的逆势入场仍有 EV+，不在此处硬拒
+  // BTC方向逆向拒绝: 市场重定价而非砸盘 (例: BTC跌时买UP=买反)
+  // 仅在偏差直接对立时拒绝, flat不阻止
+  if (directionalBias === "down" && dir === "up") {
+    return { allowed: false, reason: `BTC偏向DOWN但买UP — 重定价而非砸盘` };
+  }
+  if (directionalBias === "up" && dir === "down") {
+    return { allowed: false, reason: `BTC偏向UP但买DOWN — 重定价而非砸盘` };
+  }
   return { allowed: true };
 }

@@ -9,8 +9,6 @@ export interface DirectionalBiasParams {
   directionalMovePct: number;
   momentumContraPct: number;
   trendContraPct: number;
-  secsLeft?: number;
-  signalScore?: number;
 }
 
 export interface MispricingEvaluationParams {
@@ -30,11 +28,6 @@ export interface MispricingEvaluationParams {
   trendContraPct: number;
   momentumWindowSec: number;
   trendWindowSec: number;
-  shortMomentum30s?: number;        // 30s 窗口动量 (多窗口 dumpRatio 校验)
-  downAskAtUpPeak?: number;         // UP peak 时刻的 DOWN ask
-  upAskAtDownPeak?: number;         // DOWN peak 时刻的 UP ask
-  upSignalScore?: number;           // UP 方向加权信号净分 (Binance 交叉验证)
-  downSignalScore?: number;         // DOWN 方向加权信号净分
 }
 
 export interface MispricingCandidate {
@@ -44,7 +37,6 @@ export interface MispricingCandidate {
   oppTokenKey: "upToken" | "downToken";
   dumpDetected: string;
   dumpVelocity: "fast" | "normal" | "slow"; // 砸盘速度: fast=<800ms, slow=>3000ms
-  trendFollow?: boolean; // 趋势跟随入场(zero-sum repricing 时买上涨侧), 由 bot.ts 放宽 maxAsk
 }
 
 export interface MispricingEvaluation {
@@ -63,37 +55,22 @@ export function getDirectionalBias(params: DirectionalBiasParams): DirectionalBi
     directionalMovePct,
     momentumContraPct,
     trendContraPct,
-    secsLeft = 900,
-    signalScore = 0,
   } = params;
 
   if (roundStartPrice <= 0 || btcNow <= 0) return "flat";
   const roundDeltaPct = (btcNow - roundStartPrice) / roundStartPrice;
 
-  // 回合后半段动态降低阈值：时间越短 BTC 小幅波动对结果影响越大
-  const timeFactor = secsLeft < 450 ? 0.70 : 1.0;
-  const effMovePct = directionalMovePct * timeFactor;
-  const effTrendContra = trendContraPct * timeFactor;
-  const effMomContra = momentumContraPct * timeFactor;
-
-  // 标准 BTC momentum 判断（使用动态阈值）
   if (
-    trendMomentum <= -effTrendContra ||
-    (roundDeltaPct <= -effMovePct && shortMomentum <= -(effMomContra * 0.5))
+    trendMomentum <= -trendContraPct ||
+    (roundDeltaPct <= -directionalMovePct && shortMomentum <= -(momentumContraPct * 0.5))
   ) {
     return "down";
   }
   if (
-    trendMomentum >= effTrendContra ||
-    (roundDeltaPct >= effMovePct && shortMomentum >= (effMomContra * 0.5))
+    trendMomentum >= trendContraPct ||
+    (roundDeltaPct >= directionalMovePct && shortMomentum >= (momentumContraPct * 0.5))
   ) {
     return "up";
-  }
-
-  // 信号共识补充：BTC momentum 不够阈值但多源信号强一致时仍可出方向
-  if (signalScore >= 3.0) {
-    if (roundDeltaPct < 0 && shortMomentum < 0) return "down";
-    if (roundDeltaPct > 0 && shortMomentum > 0) return "up";
   }
 
   return "flat";
@@ -123,28 +100,23 @@ function classifyDumpVelocity(dropMs: number): "fast" | "normal" | "slow" {
 }
 
 export function evaluateMispricingOpportunity(params: MispricingEvaluationParams): MispricingEvaluation {
-  const {
-    upAsk,
-    downAsk,
-    oldestUpAsk,
-    oldestDownAsk,
-    upDrop,
-    downDrop,
-    upDropMs,
-    downDropMs,
-    dumpThreshold,
-    nearThresholdRatio,
-    shortMomentum,
-    trendMomentum,
-    momentumContraPct,
-    trendContraPct,
-    momentumWindowSec,
-    trendWindowSec,
-    shortMomentum30s = 0,
-    downAskAtUpPeak = 0,
-    upAskAtDownPeak = 0,
-    upSignalScore = 0,
-    downSignalScore = 0,
+    const {
+      upAsk,
+      downAsk,
+      oldestUpAsk,
+      oldestDownAsk,
+      upDrop,
+      downDrop,
+      upDropMs,
+      downDropMs,
+      dumpThreshold,
+      nearThresholdRatio,
+      shortMomentum,
+      trendMomentum,
+      momentumContraPct,
+      trendContraPct,
+      momentumWindowSec,
+      trendWindowSec,
   } = params;
 
   const result: MispricingEvaluation = {
@@ -154,25 +126,18 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
   };
 
   const nearThreshold = dumpThreshold * nearThresholdRatio;
-
-  // slow dump 收紧: 渐进跌价大概率是理性调价
-  const upVelocity = classifyDumpVelocity(upDropMs);
-  const dnVelocity = classifyDumpVelocity(downDropMs);
-  const upEffThreshold = upVelocity === "slow" ? dumpThreshold + 0.02 : dumpThreshold;
-  const dnEffThreshold = dnVelocity === "slow" ? dumpThreshold + 0.02 : dumpThreshold;
-
-  if (upDrop >= upEffThreshold && downDrop >= dnEffThreshold) {
+  if (upDrop >= dumpThreshold && downDrop >= dumpThreshold) {
     result.bothSidesDumping = true;
   }
 
-  if ((upDrop >= upEffThreshold && downDrop >= nearThreshold) || (downDrop >= dnEffThreshold && upDrop >= nearThreshold)) {
+  if ((upDrop >= dumpThreshold && downDrop >= nearThreshold) || (downDrop >= dumpThreshold && upDrop >= nearThreshold)) {
     result.cautionMessage = "near-dual-dump (UP -" + (upDrop * 100).toFixed(1) + "%, DN -" + (downDrop * 100).toFixed(1) + "%)";
   }
 
-  const upValid = oldestUpAsk > 0.10 && upDrop >= upEffThreshold;
-  const downValid = oldestDownAsk > 0.10 && downDrop >= dnEffThreshold;
-  const upExtremeDump = upDrop >= upEffThreshold * 1.35;
-  const downExtremeDump = downDrop >= dnEffThreshold * 1.35;
+  const upValid = oldestUpAsk > 0.10 && upDrop >= dumpThreshold;
+  const downValid = oldestDownAsk > 0.10 && downDrop >= dumpThreshold;
+  const upExtremeDump = upDrop >= dumpThreshold * 1.35;
+  const downExtremeDump = downDrop >= dumpThreshold * 1.35;
   const strongDownTrend = trendMomentum <= -trendContraPct && shortMomentum <= -(momentumContraPct * 0.5);
   const strongUpTrend = trendMomentum >= trendContraPct && shortMomentum >= (momentumContraPct * 0.5);
   const alignedDownMove = shortMomentum <= -(momentumContraPct * 1.25) && trendMomentum <= -(trendContraPct * 0.5);
@@ -194,117 +159,65 @@ export function evaluateMispricingOpportunity(params: MispricingEvaluationParams
     );
   }
 
-  const upRise = oldestUpAsk > 0.10 ? (upAsk - oldestUpAsk) / oldestUpAsk : 0;
-  const downRise = oldestDownAsk > 0.10 ? (downAsk - oldestDownAsk) / oldestDownAsk : 0;
+    const upRise = oldestUpAsk > 0.10 ? (upAsk - oldestUpAsk) / oldestUpAsk : 0;
+    const downRise = oldestDownAsk > 0.10 ? (downAsk - oldestDownAsk) / oldestDownAsk : 0;
 
-  if (upValid && !upRejected) {
-    // 多窗口 BTC 动量: 取 60s 和 30s 中更大的跌幅作分母 (防 V-型反转误判)
-    const btcDrop60 = shortMomentum < 0 ? Math.abs(shortMomentum) : 0;
-    const btcDrop30 = shortMomentum30s < 0 ? Math.abs(shortMomentum30s) : 0;
-    const btcDrop = Math.max(btcDrop60, btcDrop30);
-    const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcDrop);
-    const dumpRatio = btcDrop > 0.0001 ? upDrop / btcDrop : Infinity;
-    let effectiveDumpRatio = upVelocity === "fast" ? dynamicMinDumpRatio * 0.7
-      : upVelocity === "slow" ? dynamicMinDumpRatio * 1.3
-      : dynamicMinDumpRatio;
-    // Binance 信号交叉验证
-    if (upSignalScore >= 2.0) effectiveDumpRatio *= 0.80;
-    else if (upSignalScore <= -1.0) effectiveDumpRatio *= 1.25;
+    if (upValid && !upRejected) {
+      const upVelocity = classifyDumpVelocity(upDropMs);
+      const btcDrop = shortMomentum < 0 ? Math.abs(shortMomentum) : 0;
+      const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcDrop);
+      const dumpRatio = btcDrop > 0.0001 ? upDrop / btcDrop : Infinity;
+      const effectiveDumpRatio = upVelocity === "fast" ? dynamicMinDumpRatio * 0.7 : dynamicMinDumpRatio;
 
-    const upOppRatio = upDrop >= DEEP_DUMP_THRESHOLD ? OPPOSITE_RISE_RATIO_DEEP : OPPOSITE_RISE_RATIO_NORMAL;
-    const oppositeRose = downRise >= upDrop * upOppRatio;
-    // peak 时段内对侧涨幅检测: 更精准捕捉 repricing
-    const oppRiseSincePeak = downAskAtUpPeak > 0.10
-      ? (downAsk - downAskAtUpPeak) / downAskAtUpPeak : 0;
-    const oppositeRoseSincePeak = oppRiseSincePeak >= upDrop * upOppRatio;
-
-    if (dumpRatio < effectiveDumpRatio) {
-      result.momentumRejects.push(
-        "UP dump ratio=" + dumpRatio.toFixed(1) + " < " + effectiveDumpRatio.toFixed(0) + " (ask-" + (upDrop*100).toFixed(1) + "% vs BTC drop " + (btcDrop*100).toFixed(3) + "% vel=" + upVelocity + " sig=" + upSignalScore.toFixed(1) + ") - likely correct repricing"
-      );
-    } else if (oppositeRose || oppositeRoseSincePeak) {
-      const which = oppositeRoseSincePeak && !oppositeRose ? "since-peak" : "oldest";
-      result.momentumRejects.push(
-        "UP dump but DN ask rose +" + (downRise*100).toFixed(1) + "% (peak+" + (oppRiseSincePeak*100).toFixed(1) + "%) [" + which + "] - zero-sum repricing"
-      );
-      // 趋势跟随: UP 砸盘 + DN 上涨 + BTC 下跌 → DOWN 是赢家, 但 ask 已在上涨, 仍可能有 BSM edge
-      // 条件: BTC 60s 明确下跌(<-0.03%) 且 DN 信号共识支持 + DN ask 在 0.30-0.85 合理区间
-      const btcConfirmsDown = shortMomentum <= -0.0003;
-      if (btcConfirmsDown && downSignalScore >= 1.5 && downAsk >= 0.30 && downAsk <= 0.85) {
-        result.candidates.push({
-          dir: "down",
-          askPrice: downAsk,
-          buyTokenKey: "downToken",
-          oppTokenKey: "upToken",
-          dumpDetected: "TREND-FOLLOW: UP dump -" + (upDrop*100).toFixed(1) + "% + DN rise +" + (downRise*100).toFixed(1) + "% (BTC60=" + (shortMomentum*100).toFixed(3) + "% sig=" + downSignalScore.toFixed(1) + ") → buy DN @" + downAsk.toFixed(2),
-          dumpVelocity: upVelocity,
-          trendFollow: true,
-        });
-      }
-    } else {
-      result.candidates.push({
-        dir: "up",
-        askPrice: upAsk,
-        buyTokenKey: "upToken",
-        oppTokenKey: "downToken",
-        dumpDetected: "UP ask " + oldestUpAsk.toFixed(2) + "->" + upAsk.toFixed(2) + " (-" + (upDrop * 100).toFixed(1) + "%) [BTC" + momentumWindowSec + " " + (shortMomentum * 100).toFixed(3) + "% BTC30 " + (shortMomentum30s * 100).toFixed(3) + "% ratio=" + dumpRatio.toFixed(0) + " dnRise=" + (downRise*100).toFixed(1) + "% vel=" + upVelocity + " sig=" + upSignalScore.toFixed(1) + "]",
-        dumpVelocity: upVelocity,
-      });
-    }
-  }
-
-  if (downValid && !downRejected) {
-    // 多窗口 BTC 动量
-    const btcRise60 = shortMomentum > 0 ? shortMomentum : 0;
-    const btcRise30 = shortMomentum30s > 0 ? shortMomentum30s : 0;
-    const btcRise = Math.max(btcRise60, btcRise30);
-    const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcRise);
-    const dumpRatio = btcRise > 0.0001 ? downDrop / btcRise : Infinity;
-    let effectiveDumpRatio = dnVelocity === "fast" ? dynamicMinDumpRatio * 0.7
-      : dnVelocity === "slow" ? dynamicMinDumpRatio * 1.3
-      : dynamicMinDumpRatio;
-    // Binance 信号交叉验证
-    if (downSignalScore >= 2.0) effectiveDumpRatio *= 0.80;
-    else if (downSignalScore <= -1.0) effectiveDumpRatio *= 1.25;
-
-    const dnOppRatio = downDrop >= DEEP_DUMP_THRESHOLD ? OPPOSITE_RISE_RATIO_DEEP : OPPOSITE_RISE_RATIO_NORMAL;
-    const oppositeRose = upRise >= downDrop * dnOppRatio;
-    const oppRiseSincePeak = upAskAtDownPeak > 0.10
-      ? (upAsk - upAskAtDownPeak) / upAskAtDownPeak : 0;
-    const oppositeRoseSincePeak = oppRiseSincePeak >= downDrop * dnOppRatio;
-
-    if (dumpRatio < effectiveDumpRatio) {
-      result.momentumRejects.push(
-        "DN dump ratio=" + dumpRatio.toFixed(1) + " < " + effectiveDumpRatio.toFixed(0) + " (ask-" + (downDrop*100).toFixed(1) + "% vs BTC rise " + (btcRise*100).toFixed(3) + "% vel=" + dnVelocity + " sig=" + downSignalScore.toFixed(1) + ") - likely correct repricing"
-      );
-    } else if (oppositeRose || oppositeRoseSincePeak) {
-      const which = oppositeRoseSincePeak && !oppositeRose ? "since-peak" : "oldest";
-      result.momentumRejects.push(
-        "DN dump but UP ask rose +" + (upRise*100).toFixed(1) + "% (peak+" + (oppRiseSincePeak*100).toFixed(1) + "%) [" + which + "] - zero-sum repricing"
-      );
-      // 趋势跟随: DN 砸盘 + UP 上涨 + BTC 上涨 → UP 是赢家, 仍可能有 BSM edge
-      const btcConfirmsUp = shortMomentum >= 0.0003;
-      if (btcConfirmsUp && upSignalScore >= 1.5 && upAsk >= 0.30 && upAsk <= 0.85) {
+      const upOppRatio = upDrop >= DEEP_DUMP_THRESHOLD ? OPPOSITE_RISE_RATIO_DEEP : OPPOSITE_RISE_RATIO_NORMAL;
+      const oppositeRose = downRise >= upDrop * upOppRatio;
+      if (dumpRatio < effectiveDumpRatio) {
+        result.momentumRejects.push(
+          "UP dump ratio=" + dumpRatio.toFixed(1) + " < " + effectiveDumpRatio.toFixed(0) + " (ask-" + (upDrop*100).toFixed(1) + "% vs BTC drop " + (btcDrop*100).toFixed(3) + "% vel=" + upVelocity + ") - likely correct repricing"
+        );
+      } else if (oppositeRose) {
+        result.momentumRejects.push(
+          "UP dump but DN ask rose +" + (downRise*100).toFixed(1) + "% (>=" + (upDrop*upOppRatio*100).toFixed(1) + "%) - zero-sum repricing"
+        );
+      } else {
         result.candidates.push({
           dir: "up",
           askPrice: upAsk,
           buyTokenKey: "upToken",
           oppTokenKey: "downToken",
-          dumpDetected: "TREND-FOLLOW: DN dump -" + (downDrop*100).toFixed(1) + "% + UP rise +" + (upRise*100).toFixed(1) + "% (BTC60=+" + (shortMomentum*100).toFixed(3) + "% sig=" + upSignalScore.toFixed(1) + ") → buy UP @" + upAsk.toFixed(2),
-          dumpVelocity: dnVelocity,
-          trendFollow: true,
+          dumpDetected: "UP ask " + oldestUpAsk.toFixed(2) + "->" + upAsk.toFixed(2) + " (-" + (upDrop * 100).toFixed(1) + "%) [BTC" + momentumWindowSec + " " + (shortMomentum * 100).toFixed(3) + "% BTC" + trendWindowSec + " " + (trendMomentum * 100).toFixed(3) + "% ratio=" + dumpRatio.toFixed(0) + " dnRise=" + (downRise*100).toFixed(1) + "% vel=" + upVelocity + "]",
+          dumpVelocity: upVelocity,
         });
       }
-    } else {
-      result.candidates.push({
-        dir: "down",
-        askPrice: downAsk,
-        buyTokenKey: "downToken",
-        oppTokenKey: "upToken",
-        dumpDetected: "DOWN ask " + oldestDownAsk.toFixed(2) + "->" + downAsk.toFixed(2) + " (-" + (downDrop * 100).toFixed(1) + "%) [BTC" + momentumWindowSec + " " + (shortMomentum * 100).toFixed(3) + "% BTC30 " + (shortMomentum30s * 100).toFixed(3) + "% ratio=" + dumpRatio.toFixed(0) + " upRise=" + (upRise*100).toFixed(1) + "% vel=" + dnVelocity + " sig=" + downSignalScore.toFixed(1) + "]",
-        dumpVelocity: dnVelocity,
-      });
     }
+
+    if (downValid && !downRejected) {
+      const dnVelocity = classifyDumpVelocity(downDropMs);
+      const btcRise = shortMomentum > 0 ? shortMomentum : 0;
+      const dynamicMinDumpRatio = getDynamicMinDumpRatio(btcRise);
+      const dumpRatio = btcRise > 0.0001 ? downDrop / btcRise : Infinity;
+      const effectiveDumpRatio = dnVelocity === "fast" ? dynamicMinDumpRatio * 0.7 : dynamicMinDumpRatio;
+
+      const dnOppRatio = downDrop >= DEEP_DUMP_THRESHOLD ? OPPOSITE_RISE_RATIO_DEEP : OPPOSITE_RISE_RATIO_NORMAL;
+      const oppositeRose = upRise >= downDrop * dnOppRatio;
+      if (dumpRatio < effectiveDumpRatio) {
+        result.momentumRejects.push(
+          "DN dump ratio=" + dumpRatio.toFixed(1) + " < " + effectiveDumpRatio.toFixed(0) + " (ask-" + (downDrop*100).toFixed(1) + "% vs BTC rise " + (btcRise*100).toFixed(3) + "% vel=" + dnVelocity + ") - likely correct repricing"
+        );
+      } else if (oppositeRose) {
+        result.momentumRejects.push(
+          "DN dump but UP ask rose +" + (upRise*100).toFixed(1) + "% (>=" + (downDrop*dnOppRatio*100).toFixed(1) + "%) - zero-sum repricing"
+        );
+      } else {
+        result.candidates.push({
+          dir: "down",
+          askPrice: downAsk,
+          buyTokenKey: "downToken",
+          oppTokenKey: "upToken",
+          dumpDetected: "DOWN ask " + oldestDownAsk.toFixed(2) + "->" + downAsk.toFixed(2) + " (-" + (downDrop * 100).toFixed(1) + "%) [BTC" + momentumWindowSec + " " + (shortMomentum * 100).toFixed(3) + "% BTC" + trendWindowSec + " " + (trendMomentum * 100).toFixed(3) + "% ratio=" + dumpRatio.toFixed(0) + " upRise=" + (upRise*100).toFixed(1) + "% vel=" + dnVelocity + "]",
+          dumpVelocity: dnVelocity,
+        });
+      }
   }
 
   result.candidates.sort((left, right) => {

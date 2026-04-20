@@ -9,7 +9,6 @@ import { loadAuditReport } from "./audit";
 import { Hedge15mEngine } from "./bot";
 import { getDecisionAuditFilePath, getLogFilePath } from "./instancePaths";
 import { logger } from "./logger";
-import { startLatencyMonitor } from "./latency";
 import * as fs from "fs";
 
 const app = express();
@@ -154,7 +153,8 @@ app.post("/api/start", auth, async (req, res) => {
     res.status(400).json({ error: "机器人已在运行" });
     return;
   }
-  const { privateKey, funderAddress, mode, paperBalance, paperSessionMode } = req.body;
+  const { privateKey, funderAddress, mode, paperBalance, paperSessionMode,
+    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction } = req.body;
   const tradingMode = mode === "paper" ? "paper" : "live";
   if (privateKey) updateConfig({ PRIVATE_KEY: privateKey });
   if (funderAddress) updateConfig({ FUNDER_ADDRESS: funderAddress });
@@ -168,6 +168,11 @@ app.post("/api/start", auth, async (req, res) => {
       mode: tradingMode,
       paperBalance: Number(paperBalance) > 0 ? Number(paperBalance) : undefined,
       paperSessionMode: paperSessionMode === "persistent" ? "persistent" : "session",
+      dumpConfirmCycles: dumpConfirmCycles != null ? Number(dumpConfirmCycles) : undefined,
+      entryWindowPreset: entryWindowPreset || undefined,
+      maxEntryAsk: maxEntryAsk != null ? Number(maxEntryAsk) : undefined,
+      dualSideMaxAsk: dualSideMaxAsk != null ? Number(dualSideMaxAsk) : undefined,
+      kellyFraction: kellyFraction != null ? Number(kellyFraction) : undefined,
     });
     res.json({
       ok: true,
@@ -200,11 +205,9 @@ app.get("/api/download-all", auth, (_req, res) => {
   const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出理由 |";
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
-    const price = h.pairObservedCost > 0 ? h.pairObservedCost : (h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0);
-    const shares = h.pairMatchedShares || h.leg1Shares || 0;
-    const dir = h.winningLeg ? `PAIR/${String(h.winningLeg).toUpperCase()}` : (h.leg1Dir || "");
+    const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
     const pf = h.profit >= 0 ? `+$${h.profit.toFixed(2)}` : `-$${Math.abs(h.profit).toFixed(2)}`;
-    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${dir} | $${price.toFixed(2)} | ${Number(shares).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${h.entrySource || "-"} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
+    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${h.entrySource || "-"} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
   });
 
   // ── Decision audit table ──
@@ -225,15 +228,13 @@ app.get("/api/download-all", auth, (_req, res) => {
   // ── Logs (last 500 lines) ──
   let logLines = "";
   try {
-    logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8") : "";
+    logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8").split("\n").slice(-500).join("\n") : "";
   } catch { /* empty */ }
 
   // ── Assemble Markdown ──
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const state = bot.getState();
   const summary = [
-    `- cash: $${state.cashBalance.toFixed(2)}`,
-    `- openPositionValue: $${state.openPositionValue.toFixed(2)}`,
     `- 余额: $${state.balance.toFixed(2)}`,
     `- 总盈亏: $${state.totalProfit.toFixed(2)}`,
     `- 战绩: ${state.wins}W / ${state.losses}L / ${state.skips}S`,
@@ -277,9 +278,11 @@ app.get("/api/download-logs", auth, (_req, res) => {
     return;
   }
   const raw = fs.readFileSync(logPath, "utf-8");
+  const lines = raw.split("\n");
+  const tail = lines.slice(-1000).join("\n");
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${path.basename(logPath)}"`);
-  res.send(raw);
+  res.send(tail);
 });
 
 app.get("/api/download-history", auth, (_req, res) => {
@@ -334,7 +337,6 @@ setInterval(() => {
 // --- Start ---
 
 export function startServer(): void {
-  startLatencyMonitor();
   const port = ServerConfig.PORT;
   server.listen(port, () => {
     console.log(`15分钟对冲机器人面板: http://localhost:${port}`);

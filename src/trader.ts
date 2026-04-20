@@ -46,8 +46,6 @@ interface BestPriceSnapshot {
   spread: number;
   askDepth: number;
   bidDepth: number;
-  askLevels: BookLevel[];
-  bidLevels: BookLevel[];
   updatedAt: number;
 }
 
@@ -82,11 +80,6 @@ interface OrderUpdateWaiter {
 interface MarketBookLevel {
   price: string;
   size: string;
-}
-
-export interface BookLevel {
-  price: number;
-  size: number;
 }
 
 interface MarketSocketMessage {
@@ -211,34 +204,11 @@ function trimBookSide(side: Map<number, number>, direction: "bid" | "ask"): void
   }
 }
 
-function getSortedBookLevels(side: Map<number, number>, direction: "bid" | "ask"): BookLevel[] {
+function getSortedBookLevels(side: Map<number, number>, direction: "bid" | "ask"): Array<{ price: number; size: number }> {
   return Array.from(side.entries())
     .map(([price, size]) => ({ price, size }))
     .filter((level) => level.price > 0 && level.size > 0)
     .sort((left, right) => direction === "ask" ? left.price - right.price : right.price - left.price);
-}
-
-function cloneBookLevels(levels: BookLevel[] | undefined): BookLevel[] {
-  return (levels || []).map((level) => ({ price: level.price, size: level.size }));
-}
-
-function quoteBuyWithBudget(levels: BookLevel[], rawBudget: number): { filled: number; avgPrice: number; rawCost: number } {
-  if (!Number.isFinite(rawBudget) || rawBudget <= 0) return { filled: 0, avgPrice: 0, rawCost: 0 };
-  let remainingBudget = rawBudget;
-  let filled = 0;
-  let rawCost = 0;
-  for (const level of levels) {
-    if (remainingBudget <= 0) break;
-    if (level.price <= 0 || level.size <= 0) continue;
-    const levelCost = level.price * level.size;
-    const takeCost = Math.min(remainingBudget, levelCost);
-    const takeShares = takeCost / level.price;
-    if (takeShares <= 0) continue;
-    filled += takeShares;
-    rawCost += takeCost;
-    remainingBudget -= takeCost;
-  }
-  return { filled, avgPrice: filled > 0 ? rawCost / filled : 0, rawCost };
 }
 
 function summarizeBookMap(side: Map<number, number>, direction: "bid" | "ask"): { price: number | null; depth: number } {
@@ -323,13 +293,6 @@ export class Trader {
 
   isPaperMode(): boolean {
     return this.mode === "paper";
-  }
-
-  setPaperBalance(balance: number): void {
-    if (this.mode !== "paper") return;
-    const parsed = Number(balance);
-    if (!Number.isFinite(parsed) || parsed < 0) return;
-    this.paperBalance = parsed;
   }
 
   private nextPaperOrderId(prefix: string): string {
@@ -597,13 +560,11 @@ export class Trader {
     const tokenId = message.asset_id;
     if (message.event_type === "book" && tokenId) {
       const now = Date.now();
-      const bids = buildBookMap(message.bids);
-      const asks = buildBookMap(message.asks);
-      const bidSide = summarizeBookMap(bids, "bid");
-      const askSide = summarizeBookMap(asks, "ask");
+      const bidSide = summarizeBookSide(message.bids, "bid");
+      const askSide = summarizeBookSide(message.asks, "ask");
       this.localOrderbooks.set(tokenId, {
-        bids,
-        asks,
+        bids: buildBookMap(message.bids),
+        asks: buildBookMap(message.asks),
         updatedAt: now,
         lastFullSyncAt: now,
         source: "ws",
@@ -615,8 +576,6 @@ export class Trader {
         spread,
         askDepth: askSide.depth,
         bidDepth: bidSide.depth,
-        askLevels: getSortedBookLevels(asks, "ask"),
-        bidLevels: getSortedBookLevels(bids, "bid"),
         updatedAt: Date.now(),
       });
       this.notifyOrderbookUpdate();
@@ -649,8 +608,6 @@ export class Trader {
           bid: bestBid > 0 ? bestBid : snapshot.bid,
           ask: bestAsk > 0 ? bestAsk : snapshot.ask,
           spread: bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : snapshot.spread,
-          askLevels: cloneBookLevels(snapshot.askLevels),
-          bidLevels: cloneBookLevels(snapshot.bidLevels),
           updatedAt: Date.now(),
         });
         updated = true;
@@ -679,8 +636,6 @@ export class Trader {
         spread,
         askDepth: bestAskSize || snapshot?.askDepth || cached?.askDepth || 0,
         bidDepth: bestBidSize || snapshot?.bidDepth || cached?.bidDepth || 0,
-        askLevels: cloneBookLevels(snapshot?.askLevels ?? cached?.askLevels),
-        bidLevels: cloneBookLevels(snapshot?.bidLevels ?? cached?.bidLevels),
         updatedAt: Date.now(),
       });
       this.notifyOrderbookUpdate();
@@ -768,8 +723,6 @@ export class Trader {
     if (!book) return null;
     const bids = summarizeBookMap(book.bids, "bid");
     const asks = summarizeBookMap(book.asks, "ask");
-    const bidLevels = getSortedBookLevels(book.bids, "bid");
-    const askLevels = getSortedBookLevels(book.asks, "ask");
     if (bids.price != null && asks.price != null && bids.price >= asks.price) {
       return null;
     }
@@ -779,8 +732,6 @@ export class Trader {
       spread: asks.price != null && bids.price != null ? asks.price - bids.price : 1,
       askDepth: asks.depth,
       bidDepth: bids.depth,
-      askLevels,
-      bidLevels,
     };
   }
 
@@ -949,14 +900,12 @@ export class Trader {
     });
   }
 
-  peekBestPrices(tokenId: string, maxAgeMs = getAdaptiveCacheTtlMs(), localSnapshotMaxAgeMs = Math.max(maxAgeMs, LOCAL_BOOK_SNAPSHOT_MAX_AGE_MS)): {
+  peekBestPrices(tokenId: string, maxAgeMs = getAdaptiveCacheTtlMs()): {
     bid: number | null;
     ask: number | null;
     spread: number;
     askDepth: number;
     bidDepth: number;
-    askLevels: BookLevel[];
-    bidLevels: BookLevel[];
   } | null {
     const cached = this.orderbookCache.get(tokenId);
     if (cached && Date.now() - cached.updatedAt <= maxAgeMs) {
@@ -966,13 +915,11 @@ export class Trader {
         spread: cached.spread,
         askDepth: cached.askDepth,
         bidDepth: cached.bidDepth,
-        askLevels: cloneBookLevels(cached.askLevels),
-        bidLevels: cloneBookLevels(cached.bidLevels),
       };
     }
     const localSnapshot = this.snapshotFromLocalOrderbook(tokenId);
     const book = this.localOrderbooks.get(tokenId);
-    if (localSnapshot && book && Date.now() - book.updatedAt <= localSnapshotMaxAgeMs) {
+    if (localSnapshot && book && Date.now() - book.updatedAt <= Math.max(maxAgeMs, LOCAL_BOOK_SNAPSHOT_MAX_AGE_MS)) {
       this.orderbookCache.set(tokenId, { ...localSnapshot, updatedAt: book.updatedAt });
       return localSnapshot;
     }
@@ -983,26 +930,34 @@ export class Trader {
     try {
       const now = Date.now();
       const book = await this.client.getOrderBook(tokenId);
-      const bids = buildBookMap(book.bids as MarketBookLevel[] | undefined);
-      const asks = buildBookMap(book.asks as MarketBookLevel[] | undefined);
-      const bidLevels = getSortedBookLevels(bids, "bid");
-      const askLevels = getSortedBookLevels(asks, "ask");
-      const bestBid = bidLevels.length ? bidLevels[0].price : null;
-      const bestAsk = askLevels.length ? askLevels[0].price : null;
+      const bestBid = book.bids?.length ? Math.max(...book.bids.map(b => parseFloat(b.price))) : null;
+      const bestAsk = book.asks?.length ? Math.min(...book.asks.map(a => parseFloat(a.price))) : null;
       const spread = (bestAsk != null && bestBid != null) ? bestAsk - bestBid : 1;
       this.localOrderbooks.set(tokenId, {
-        bids,
-        asks,
+        bids: buildBookMap(book.bids as MarketBookLevel[] | undefined),
+        asks: buildBookMap(book.asks as MarketBookLevel[] | undefined),
         updatedAt: now,
         lastFullSyncAt: now,
         source: "http",
       });
-      const askDepth = askLevels.slice(0, 3).reduce((sum, level) => sum + level.size, 0);
-      const bidDepth = bidLevels.slice(0, 3).reduce((sum, level) => sum + level.size, 0);
-      return { bid: bestBid, ask: bestAsk, spread, askDepth, bidDepth, askLevels, bidLevels };
+      let askDepth = 0;
+      if (book.asks) {
+        const sorted = book.asks.slice().sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
+        for (let i = 0; i < Math.min(3, sorted.length); i++) {
+          askDepth += parseFloat(sorted[i].size || "0");
+        }
+      }
+      let bidDepth = 0;
+      if (book.bids) {
+        const sorted = book.bids.slice().sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+        for (let i = 0; i < Math.min(3, sorted.length); i++) {
+          bidDepth += parseFloat(sorted[i].size || "0");
+        }
+      }
+      return { bid: bestBid, ask: bestAsk, spread, askDepth, bidDepth };
     } catch (e: any) {
       logger.error(`获取盘口失败: ${e.message}`);
-      return { bid: null, ask: null, spread: 1, askDepth: 0, bidDepth: 0, askLevels: [], bidLevels: [] };
+      return { bid: null, ask: null, spread: 1, askDepth: 0, bidDepth: 0 };
     }
   }
 
@@ -1077,7 +1032,7 @@ export class Trader {
     return order;
   }
 
-  async getBestPrices(tokenId: string): Promise<{ bid: number | null; ask: number | null; spread: number; askDepth: number; bidDepth: number; askLevels: BookLevel[]; bidLevels: BookLevel[] }> {
+  async getBestPrices(tokenId: string): Promise<{ bid: number | null; ask: number | null; spread: number; askDepth: number; bidDepth: number }> {
     const cached = this.peekBestPrices(tokenId);
     if (cached) {
       return cached;
@@ -1091,18 +1046,14 @@ export class Trader {
   async placeFakBuy(tokenId: string, amount: number, negRisk = false): Promise<any> {
     if (this.mode === "paper") {
       const book = await this.getBestPrices(tokenId);
-      const askLevels = book.askLevels.length > 0
-        ? book.askLevels
-        : book.ask != null && book.ask > 0 && book.askDepth > 0
-          ? [{ price: book.ask, size: book.askDepth }]
-          : [];
-      if (askLevels.length === 0) {
+      if (book.ask == null || book.ask <= 0 || book.askDepth <= 0) {
         logger.warn(`PAPER FAK买入失败: 无可用ask token=${tokenId.slice(0, 20)}...`);
         return null;
       }
-      const rawBudget = Math.min(amount, this.paperBalance / (1 + PAPER_TAKER_FEE));
-      const fill = quoteBuyWithBudget(askLevels, rawBudget);
-      if (fill.filled < 1e-6 || fill.avgPrice <= 0) {
+      const requestedShares = amount / book.ask;
+      const affordableShares = this.paperBalance / (book.ask * (1 + PAPER_TAKER_FEE));
+      const filled = Math.min(requestedShares, book.askDepth, affordableShares);
+      if (filled < 1e-6) {
         logger.warn(`PAPER FAK买入失败: 余额不足或深度不足 token=${tokenId.slice(0, 20)}...`);
         return null;
       }
@@ -1112,12 +1063,12 @@ export class Trader {
         tokenId,
         side: "BUY",
         orderType: "FAK",
-        size: fill.filled,
-        filled: fill.filled,
-        avgPrice: fill.avgPrice,
+        size: requestedShares,
+        filled,
+        avgPrice: book.ask,
       });
-      this.paperBalance -= fill.rawCost * (1 + PAPER_TAKER_FEE);
-      logger.info(`PAPER FAK买入: ${fill.filled.toFixed(2)}份 @$${fill.avgPrice.toFixed(2)} token=${tokenId.slice(0, 20)}... negRisk=${negRisk}`);
+      this.paperBalance -= filled * book.ask * (1 + PAPER_TAKER_FEE);
+      logger.info(`PAPER FAK买入: ${filled.toFixed(2)}份 @$${book.ask.toFixed(2)} token=${tokenId.slice(0, 20)}... negRisk=${negRisk}`);
       return { orderID: orderId };
     }
     try {

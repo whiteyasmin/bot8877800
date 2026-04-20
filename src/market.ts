@@ -23,17 +23,13 @@ let prefetchedSlug = "";
 let prefetchedRound: Round15m | null = null;
 let prefetchedEndTime = 0;   // endDate的毫秒时间戳, 用于精确计算secondsLeft
 
-function computeRoundStartSec(nowMs = Date.now()): number {
-  const nowSec = Math.floor(nowMs / 1000);
-  return nowSec - (nowSec % ROUND_DURATION);
-}
-
 function clampRoundSeconds(secondsLeft: number): number {
   return Math.max(0, Math.min(ROUND_DURATION, secondsLeft));
 }
 
 function computeSlug(): string {
-  const roundStart = computeRoundStartSec();
+  const now = Math.floor(Date.now() / 1000);
+  const roundStart = now - (now % ROUND_DURATION);
   return `btc-updown-15m-${roundStart}`;
 }
 
@@ -98,7 +94,8 @@ function parseTokens(market: Record<string, any>): { up: string; down: string } 
 
 /** 预加载下一轮市场 tokens，消除回合切换的 Gamma API 冷启动延迟 */
 export async function prefetchNextRound(): Promise<void> {
-  const nextStart = computeRoundStartSec() + ROUND_DURATION;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const nextStart = (nowSec - (nowSec % ROUND_DURATION)) + ROUND_DURATION;
   const slug = `btc-updown-15m-${nextStart}`;
   if (prefetchedSlug === slug) return; // 已在处理，防止并发重复请求
   prefetchedSlug = slug; // 先占位
@@ -130,7 +127,6 @@ export async function prefetchNextRound(): Promise<void> {
 
 export async function getCurrentRound15m(): Promise<Round15m | null> {
   const now = Date.now();
-  const currentRoundStart = computeRoundStartSec(now);
 
   // 优先使用预加载数据，消除回合切换时的冷启动延迟
   const curSlug = computeSlug();
@@ -158,8 +154,13 @@ export async function getCurrentRound15m(): Promise<Round15m | null> {
   let event = await fetchEvent(slug);
 
   if (!event) {
-    cache = null;
-    return null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const nextStart = nowSec - (nowSec % ROUND_DURATION) + ROUND_DURATION;
+    event = await fetchEvent(`btc-updown-15m-${nextStart}`);
+    if (!event) {
+      cache = null;
+      return null;
+    }
   }
 
   const markets = event.markets as any[] | undefined;
@@ -177,12 +178,6 @@ export async function getCurrentRound15m(): Promise<Round15m | null> {
   const endTime = new Date(endStr).getTime();
   const secondsLeft = clampRoundSeconds((endTime - Date.now()) / 1000);
   if (secondsLeft <= 0) {
-    cache = null;
-    return null;
-  }
-
-  const eventRoundStart = Math.floor(endTime / 1000) - ROUND_DURATION;
-  if (eventRoundStart > currentRoundStart) {
     cache = null;
     return null;
   }

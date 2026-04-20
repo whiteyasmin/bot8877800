@@ -11,16 +11,6 @@ export interface PaperRuntimeState {
   // 持仓崩溃恢复
   openPosition?: {
     conditionId: string;
-    upToken?: string;
-    downToken?: string;
-    upHeldShares?: number;
-    downHeldShares?: number;
-    upAvgFill?: number;
-    downAvgFill?: number;
-    matchedShares?: number;
-    signalCost?: number;
-    observedCost?: number;
-    lockedEdge?: number;
     leg1Dir: string;
     leg1Token: string;
     leg1Shares: number;
@@ -30,11 +20,6 @@ export interface PaperRuntimeState {
     roundStartBtcPrice: number;
     entrySource: string;
     filledAt: number;
-    activeStrategyMode?: string;
-    singleSide?: string;
-    singlePartialTaken?: boolean;
-    singleRealizedCost?: number;
-    singleRealizedReturn?: number;
   } | null;
 }
 
@@ -60,16 +45,6 @@ export function loadPaperRuntimeState(): PaperRuntimeState | null {
       updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
       openPosition: raw.openPosition && typeof raw.openPosition === "object" ? {
         conditionId: String(raw.openPosition.conditionId || ""),
-        upToken: String(raw.openPosition.upToken || ""),
-        downToken: String(raw.openPosition.downToken || ""),
-        upHeldShares: Number(raw.openPosition.upHeldShares) || 0,
-        downHeldShares: Number(raw.openPosition.downHeldShares) || 0,
-        upAvgFill: Number(raw.openPosition.upAvgFill) || 0,
-        downAvgFill: Number(raw.openPosition.downAvgFill) || 0,
-        matchedShares: Number(raw.openPosition.matchedShares) || 0,
-        signalCost: Number(raw.openPosition.signalCost) || 0,
-        observedCost: Number(raw.openPosition.observedCost) || 0,
-        lockedEdge: Number(raw.openPosition.lockedEdge) || 0,
         leg1Dir: String(raw.openPosition.leg1Dir || ""),
         leg1Token: String(raw.openPosition.leg1Token || ""),
         leg1Shares: Number(raw.openPosition.leg1Shares) || 0,
@@ -79,11 +54,6 @@ export function loadPaperRuntimeState(): PaperRuntimeState | null {
         roundStartBtcPrice: Number(raw.openPosition.roundStartBtcPrice) || 0,
         entrySource: String(raw.openPosition.entrySource || ""),
         filledAt: Number(raw.openPosition.filledAt) || 0,
-        activeStrategyMode: String(raw.openPosition.activeStrategyMode || ""),
-        singleSide: String(raw.openPosition.singleSide || ""),
-        singlePartialTaken: Boolean(raw.openPosition.singlePartialTaken),
-        singleRealizedCost: Number(raw.openPosition.singleRealizedCost) || 0,
-        singleRealizedReturn: Number(raw.openPosition.singleRealizedReturn) || 0,
       } : null,
     };
   } catch {
