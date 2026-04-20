@@ -25,6 +25,15 @@ import {
 } from "./strategyEngine";
 import { Trader, type TraderDiagnostics } from "./trader";
 
+const DIRECTIONAL_REACTIVE_ENABLED = true;
+const DISABLE_DUAL_SIDE_PREORDER = true;
+const DIRECTIONAL_MIN_POSITIVE_EDGE = 0.01;
+const DIRECTIONAL_SMALL_EDGE = 0.03;
+const DIRECTIONAL_MEDIUM_EDGE = 0.05;
+const DIRECTIONAL_SMALL_BUDGET_SCALE = 0.35;
+const DIRECTIONAL_MEDIUM_BUDGET_SCALE = 0.60;
+const DIRECTIONAL_CHASE_MOMENTUM = 0.0012;
+
 // ── 15分钟对冲机器人参数 (延迟相关参数由 getDynamicParams() 提供) ──
 const MIN_SHARES      = 3;        // 最少3份, 低于此不开仓 (从5降低, 避免小余额死循环)
 const MAX_SHARES      = 150;      // 单腿上限150份 (低价入场EV+大, 允许更大仓位)
@@ -734,7 +743,7 @@ export class Hedge15mEngine {
     dir: string,
     quotedPrice: number,
     secsLeft: number,
-    mode: "reactive" | "dual-side",
+    mode: "reactive" | "dual-side" | "trend",
     readonly_ = false,
   ): {
     allowed: boolean;
@@ -746,16 +755,16 @@ export class Hedge15mEngine {
     reason: string;
   } {
     const { fairRaw, fairKelly, dAbs, lnMoneyness } = this.getBsSnapshot(dir, secsLeft, readonly_);
-    const takerFeeBuffer = mode === "reactive" ? quotedPrice * TAKER_FEE : 0;
-    const slippageBuffer = mode === "reactive" ? 0.005 : 0;
+    const takerFeeBuffer = mode === "reactive" || mode === "trend" ? quotedPrice * TAKER_FEE : 0;
+    const slippageBuffer = mode === "reactive" || mode === "trend" ? 0.005 : 0;
     const effectiveCost = quotedPrice + takerFeeBuffer + slippageBuffer;
     const effectiveEdge = fairRaw - effectiveCost;
 
-    let dynamicMinEdge = MIN_NET_EDGE;
+    let dynamicMinEdge = mode === "trend" ? DIRECTIONAL_MIN_POSITIVE_EDGE : MIN_NET_EDGE;
     if (secsLeft < 300) {
-      dynamicMinEdge = Math.max(0.01, MIN_NET_EDGE - 0.03); 
+      dynamicMinEdge = Math.max(0.01, dynamicMinEdge - 0.02); 
     } else if (secsLeft > 600) {
-      dynamicMinEdge = MIN_NET_EDGE + 0.02; 
+      dynamicMinEdge = dynamicMinEdge + (mode === "trend" ? 0.01 : 0.02); 
     }
     if (effectiveEdge < dynamicMinEdge) {
       return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
@@ -1430,6 +1439,10 @@ export class Hedge15mEngine {
               const trendMomentum = getRecentMomentum(TREND_WINDOW_SEC);
               const directionalBias = this.getRoundDirectionalBias();
               this.currentTrendBias = directionalBias;
+              await this.maybeEnterDirectionalLeg1(trader, rnd);
+              if (this.hedgeState !== "watching") {
+                continue;
+              }
 
               // 低价位动态降低dump阈值: ask已经便宜时不需等大跌幅
               const lowestAsk = Math.min(this.upAsk, this.downAsk);
@@ -1665,12 +1678,40 @@ export class Hedge15mEngine {
 
   // ── Trading Actions ──
 
+  private async maybeEnterDirectionalLeg1(trader: Trader, rnd: Round15m): Promise<void> {
+    if (!DIRECTIONAL_REACTIVE_ENABLED) return;
+    if (this.hedgeState !== "watching" || this.leg1EntryInFlight || this.leg1AttemptedThisRound) return;
+
+    const dir = this.currentTrendBias;
+    if (dir === "flat") return;
+
+    const askPrice = dir === "up" ? this.upAsk : this.downAsk;
+    const buyToken = dir === "up" ? rnd.upToken : rnd.downToken;
+    if (askPrice <= 0 || !buyToken) return;
+
+     const shortMomentum = getRecentMomentum(60);
+     const isChasingImpulse = (dir === "up" && shortMomentum >= DIRECTIONAL_CHASE_MOMENTUM)
+       || (dir === "down" && shortMomentum <= -DIRECTIONAL_CHASE_MOMENTUM);
+     if (isChasingImpulse && askPrice > 0.22) {
+       const skipKey = `dir-pullback:${dir}:${Math.floor(shortMomentum * 100000)}`;
+       if (skipKey !== this.lastSignalSkipKey) {
+         this.lastSignalSkipKey = skipKey;
+         logger.info(`HEDGE15M DIRECTIONAL WAIT: ${dir} impulse ${(shortMomentum * 100).toFixed(3)}%/60s, waiting for pullback`);
+       }
+       return;
+     }
+
+    await this.buyLeg1(trader, rnd, dir, askPrice, buyToken, "trend", "directional-reactive");
+  }
+
   private async buyLeg1(
     trader: Trader,
     rnd: Round15m,
     dir: string,
     askPrice: number,
     buyToken: string,
+    strategyMode: "mispricing" | "trend" = "mispricing",
+    entrySource = "reactive-mispricing",
   ): Promise<void> {
     if (this.hedgeState !== "watching" || this.leg1EntryInFlight) return;
     if (this.leg1AttemptedThisRound) {
@@ -1721,7 +1762,12 @@ export class Hedge15mEngine {
     }
 
     // ── BSM数字期权动态胜率 ──
-    const bsEntry = this.evaluateBsEntry(dir, askPrice, rnd.secondsLeft, "reactive");
+    const bsEntry = this.evaluateBsEntry(
+      dir,
+      askPrice,
+      rnd.secondsLeft,
+      strategyMode === "trend" ? "trend" : "reactive",
+    );
     if (!bsEntry.allowed) {
       this.trackRoundRejectReason(`bsm: ${bsEntry.reason}`);
       this.logBsReject("reactive", dir, askPrice, bsEntry);
@@ -1731,7 +1777,11 @@ export class Hedge15mEngine {
     const bsWinRate = bsEntry.fairKelly;
     const bsEdgeNet = bsEntry.effectiveEdge;
     let minEdgeForRegime = directionalBias === "flat" ? FLAT_MIN_NET_EDGE : NON_FLAT_MIN_NET_EDGE;
-    if (directionalBias === dir) {
+    if (strategyMode === "trend") {
+      if (directionalBias === dir) minEdgeForRegime = DIRECTIONAL_MIN_POSITIVE_EDGE;
+      else if (directionalBias === "flat") minEdgeForRegime = 0.03;
+      else minEdgeForRegime = 0.05;
+    } else if (directionalBias === dir) {
       minEdgeForRegime = Math.max(0.04, minEdgeForRegime - 0.01);
     } else if (directionalBias !== "flat" && directionalBias !== dir) {
       minEdgeForRegime += 0.02;
@@ -1805,15 +1855,20 @@ export class Hedge15mEngine {
     }
     budgetPct = Math.max(0.08, Math.min(kellyCapForPrice, budgetPct)); // EV+分层硬限 (低价→高上限)
 
+    if (strategyMode === "trend") {
+      if (bsEdgeNet < DIRECTIONAL_SMALL_EDGE) budgetPct *= DIRECTIONAL_SMALL_BUDGET_SCALE;
+      else if (bsEdgeNet < DIRECTIONAL_MEDIUM_EDGE) budgetPct *= DIRECTIONAL_MEDIUM_BUDGET_SCALE;
+    }
+
     await this.openLeg1Position(
       trader,
       dir,
       askPrice,
       buyToken,
       budgetPct,
-      "mispricing",
+      strategyMode,
       Date.now(),
-      "reactive-mispricing",
+      entrySource,
       bsEntry,
     );
   }
@@ -1908,6 +1963,12 @@ export class Hedge15mEngine {
    * 3. 如果一侧被吃到 → 等于拿到便宜的 Leg1, 持有到结算
    */
   private async manageDualSideOrders(trader: Trader, rnd: Round15m, secs: number): Promise<void> {
+    if (DISABLE_DUAL_SIDE_PREORDER) {
+      if (this.preOrderUpId || this.preOrderDownId) {
+        await this.cancelDualSideOrders(trader);
+      }
+      return;
+    }
     if (!DUAL_SIDE_ENABLED) return;
     if (this.hedgeState !== "watching") return;
     if (this.leg1EntryInFlight || this.leg1AttemptedThisRound) return;
@@ -2431,7 +2492,7 @@ export class Hedge15mEngine {
     askPrice: number,
     buyToken: string,
     budgetPct: number,
-    strategyMode: "mispricing",
+    strategyMode: "mispricing" | "trend",
     signalDetectedAt = Date.now(),
     entrySource = "reactive-mispricing",
     bsEntry?: {
@@ -2542,6 +2603,7 @@ export class Hedge15mEngine {
       this.leg1Shares = filledShares;
       this.leg1Token = buyToken;
       this.leg1MakerFill = isMaker;
+      this.activeStrategyMode = strategyMode;
       this.leg1EntrySource = entrySource;
       const feeBuffer = isMaker ? 0 : realFillPrice * TAKER_FEE;
       const slippageBuffer = isMaker ? 0 : 0.005;
@@ -2562,7 +2624,7 @@ export class Hedge15mEngine {
       this.status = `Leg1 ${dir.toUpperCase()} @${realFillPrice.toFixed(2)} x${filledShares.toFixed(0)}${isMaker ? " maker" : ""}, 等结算`;
       logger.info(`HEDGE15M LEG1 FILLED: ${dir.toUpperCase()} ${filledShares.toFixed(0)}份 ask=${entryAsk.toFixed(2)} fill=${realFillPrice.toFixed(2)} orderId=${orderId.slice(0, 12)} maker=${isMaker} fee=${(actualFee * 100).toFixed(0)}%`);
       this.writeRoundAudit("leg1-filled", {
-        strategyMode: "mispricing",
+        strategyMode,
         dir,
         entryAsk,
         fillPrice: realFillPrice,
