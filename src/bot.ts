@@ -25,7 +25,7 @@ import {
 } from "./strategyEngine";
 import { Trader, type TraderDiagnostics } from "./trader";
 
-const DIRECTIONAL_REACTIVE_ENABLED = true;
+const DIRECTIONAL_REACTIVE_ENABLED = false;
 const DISABLE_DUAL_SIDE_PREORDER = true;
 const DIRECTIONAL_MIN_POSITIVE_EDGE = 0.01;
 const DIRECTIONAL_SMALL_EDGE = 0.03;
@@ -33,6 +33,11 @@ const DIRECTIONAL_MEDIUM_EDGE = 0.05;
 const DIRECTIONAL_SMALL_BUDGET_SCALE = 0.35;
 const DIRECTIONAL_MEDIUM_BUDGET_SCALE = 0.60;
 const DIRECTIONAL_CHASE_MOMENTUM = 0.0012;
+const MISPRICING_MIN_EDGE = 0.03;
+const MISPRICING_STRONG_DROP = 0.12;
+const MISPRICING_LOW_PRICE = 0.22;
+const MISPRICING_STRONG_CONTRA_SCORE = -3;
+const MISPRICING_CONTRA_EDGE_OVERRIDE = 0.12;
 
 // ── 15分钟对冲机器人参数 (延迟相关参数由 getDynamicParams() 提供) ──
 const MIN_SHARES      = 3;        // 最少3份, 低于此不开仓 (从5降低, 避免小余额死循环)
@@ -743,7 +748,7 @@ export class Hedge15mEngine {
     dir: string,
     quotedPrice: number,
     secsLeft: number,
-    mode: "reactive" | "dual-side" | "trend",
+    mode: "reactive" | "dual-side" | "trend" | "mispricing",
     readonly_ = false,
   ): {
     allowed: boolean;
@@ -755,16 +760,16 @@ export class Hedge15mEngine {
     reason: string;
   } {
     const { fairRaw, fairKelly, dAbs, lnMoneyness } = this.getBsSnapshot(dir, secsLeft, readonly_);
-    const takerFeeBuffer = mode === "reactive" || mode === "trend" ? quotedPrice * TAKER_FEE : 0;
-    const slippageBuffer = mode === "reactive" || mode === "trend" ? 0.005 : 0;
+    const takerFeeBuffer = mode !== "dual-side" ? quotedPrice * TAKER_FEE : 0;
+    const slippageBuffer = mode !== "dual-side" ? 0.005 : 0;
     const effectiveCost = quotedPrice + takerFeeBuffer + slippageBuffer;
     const effectiveEdge = fairRaw - effectiveCost;
 
-    let dynamicMinEdge = mode === "trend" ? DIRECTIONAL_MIN_POSITIVE_EDGE : MIN_NET_EDGE;
+    let dynamicMinEdge = mode === "trend" ? DIRECTIONAL_MIN_POSITIVE_EDGE : mode === "mispricing" ? MISPRICING_MIN_EDGE : MIN_NET_EDGE;
     if (secsLeft < 300) {
       dynamicMinEdge = Math.max(0.01, dynamicMinEdge - 0.02); 
     } else if (secsLeft > 600) {
-      dynamicMinEdge = dynamicMinEdge + (mode === "trend" ? 0.01 : 0.02); 
+      dynamicMinEdge = dynamicMinEdge + (mode === "trend" ? 0.01 : mode === "mispricing" ? 0.01 : 0.02); 
     }
     if (effectiveEdge < dynamicMinEdge) {
       return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
@@ -1556,13 +1561,15 @@ export class Hedge15mEngine {
                     }
                     // 信号强一致(≥4源aligned)时跳过确认等待 — dump更可信
                     this.computeSignalAlignment(candidate.dir);
-                    const signalFastTrack = this.dirAlignedCount >= 4 && this.dirContraCount <= 1;
+                    const candidateDrop = candidate.dir === "up" ? dumpBaseline.upDrop : dumpBaseline.downDrop;
+                    const strongMispricingCandidate = candidateDrop >= MISPRICING_STRONG_DROP || candidate.askPrice <= MISPRICING_LOW_PRICE;
+                    const signalFastTrack = strongMispricingCandidate || (this.dirAlignedCount >= 3 && this.dirContraCount <= 2);
                     if (!signalFastTrack && this.dumpConfirmCount < this.rtDumpConfirmCycles) {
                       // 还未达到确认次数且信号不够强, 继续等
                     } else {
                       // ── #2 Sum分歧度过滤: 市场不确定时拒绝入场 ──
                       const currentSum = this.upAsk + this.downAsk;
-                      const candDrop = candidate.dir === "up" ? dumpBaseline.upDrop : dumpBaseline.downDrop;
+                      const candDrop = candidateDrop;
                       // 大dump(≥12%)时放宽sum上限: 深度砸盘说明定价效率低, sum略高仍有edge
                       const effectiveSumMax = candDrop >= 0.12 ? SUM_DIVERGENCE_RELAXED : SUM_DIVERGENCE_MAX;
                       if (currentSum > effectiveSumMax) {
@@ -1751,7 +1758,8 @@ export class Hedge15mEngine {
 
     // ── 低波过滤: reactive在微行情中噪声极高, 直接跳过 ──
     const reactiveVol = getRecentVolatility(300);
-    if (reactiveVol < REACTIVE_MIN_VOL) {
+    const strongMispricing = strategyMode === "mispricing" && (this.currentDumpDrop >= MISPRICING_STRONG_DROP || askPrice <= MISPRICING_LOW_PRICE);
+    if (!strongMispricing && reactiveVol < REACTIVE_MIN_VOL) {
       this.trackRoundRejectReason(`reactive-low-vol: ${(reactiveVol * 100).toFixed(3)}% < ${(REACTIVE_MIN_VOL * 100).toFixed(2)}%`);
       const skipKey = `reactive-vol:${dir}:${Math.floor(reactiveVol * 100000)}`;
       if (skipKey !== this.lastSignalSkipKey) {
@@ -1766,7 +1774,7 @@ export class Hedge15mEngine {
       dir,
       askPrice,
       rnd.secondsLeft,
-      strategyMode === "trend" ? "trend" : "reactive",
+      strategyMode === "trend" ? "trend" : "mispricing",
     );
     if (!bsEntry.allowed) {
       this.trackRoundRejectReason(`bsm: ${bsEntry.reason}`);
@@ -1781,6 +1789,13 @@ export class Hedge15mEngine {
       if (directionalBias === dir) minEdgeForRegime = DIRECTIONAL_MIN_POSITIVE_EDGE;
       else if (directionalBias === "flat") minEdgeForRegime = 0.03;
       else minEdgeForRegime = 0.05;
+    } else if (strategyMode === "mispricing") {
+      if (directionalBias === dir) minEdgeForRegime = 0.03;
+      else if (directionalBias === "flat") minEdgeForRegime = 0.04;
+      else minEdgeForRegime = 0.06;
+      if (strongMispricing) {
+        minEdgeForRegime = Math.max(MISPRICING_MIN_EDGE, minEdgeForRegime - 0.02);
+      }
     } else if (directionalBias === dir) {
       minEdgeForRegime = Math.max(0.04, minEdgeForRegime - 0.01);
     } else if (directionalBias !== "flat" && directionalBias !== dir) {
@@ -1802,16 +1817,29 @@ export class Hedge15mEngine {
     }
 
     const alignmentScore = this.dirAlignedCount - this.dirContraCount;
-    const alignmentFloor = directionalBias !== "flat" && directionalBias !== dir ? 0 : REACTIVE_MIN_ALIGNMENT_SCORE;
-    const strongCounterTrendOverride = bsEdgeNet >= (REACTIVE_ALIGNMENT_EDGE_OVERRIDE + 0.05);
-    if (alignmentScore < alignmentFloor && bsEdgeNet < REACTIVE_ALIGNMENT_EDGE_OVERRIDE && !strongCounterTrendOverride) {
-      this.trackRoundRejectReason(`alignment: score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
-      const skipKey = `align:${dir}:${alignmentScore}:${Math.floor(bsEdgeNet * 1000)}`;
-      if (skipKey !== this.lastSignalSkipKey) {
-        this.lastSignalSkipKey = skipKey;
-        logger.info(`HEDGE15M REACTIVE SKIP: weak signals score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+    if (strategyMode === "mispricing") {
+      const strongContra = alignmentScore <= MISPRICING_STRONG_CONTRA_SCORE;
+      if (strongContra && bsEdgeNet < MISPRICING_CONTRA_EDGE_OVERRIDE) {
+        this.trackRoundRejectReason(`strong-contra: score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+        const skipKey = `contra:${dir}:${alignmentScore}:${Math.floor(bsEdgeNet * 1000)}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M MISPRICING SKIP: strong contra score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+        }
+        return;
       }
-      return;
+    } else {
+      const alignmentFloor = directionalBias !== "flat" && directionalBias !== dir ? 0 : REACTIVE_MIN_ALIGNMENT_SCORE;
+      const strongCounterTrendOverride = bsEdgeNet >= (REACTIVE_ALIGNMENT_EDGE_OVERRIDE + 0.05);
+      if (alignmentScore < alignmentFloor && bsEdgeNet < REACTIVE_ALIGNMENT_EDGE_OVERRIDE && !strongCounterTrendOverride) {
+        this.trackRoundRejectReason(`alignment: score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+        const skipKey = `align:${dir}:${alignmentScore}:${Math.floor(bsEdgeNet * 1000)}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M REACTIVE SKIP: weak signals score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
+        }
+        return;
+      }
     }
 
     const netEdgeTier = this.getNetEdgeTier(bsEdgeNet);
