@@ -321,10 +321,6 @@ tr:hover{background:rgba(118,183,255,.03)}
             <input type="number" id="cfg-paper-balance" placeholder="100" value="100" min="10" step="10">
           </div>
           <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成 (仓位/时间窗/阈值)</div>
-          <div class="span2" style="display:flex;align-items:center;gap:8px;margin-top:2px;">
-            <input type="checkbox" id="cfg-panic-hedge" checked style="width:auto">
-            <label for="cfg-panic-hedge" style="margin:0;color:var(--text);font-size:12px">启用 Panic Hedge（恐慌对冲）</label>
-          </div>
           <div>
             <label>资金地址</label>
             <input type="text" id="cfg-fa" placeholder="0x..." autocomplete="off">
@@ -385,6 +381,7 @@ function formatEntrySource(source) {
   if (source === 'directional-reactive') return '趋势入场';
   if (source === 'reactive-mispricing') return '错价入场';
   if (source === 'panic-hedge') return '恐慌对冲';
+  if (source === 'panic-hedge-post') return '持仓对冲';
   if (source === 'counter-win') return '反向赌赢';
   if (source === 'dual-side-preorder') return '预挂入场';
   return source || '--';
@@ -403,6 +400,7 @@ function sourcePillClass(source) {
   if (source === '趋势入场') return 'pill pill-trend';
   if (source === '错价入场') return 'pill pill-dump';
   if (source === '恐慌对冲') return 'pill pill-dump';
+  if (source === '持仓对冲') return 'pill pill-pre';
   if (source === '反向赌赢') return 'pill pill-trend';
   if (source === '预挂入场') return 'pill pill-pre';
   return 'pill pill-idle';
@@ -438,7 +436,7 @@ async function startBot() {
   const fa = document.getElementById('cfg-fa').value.trim();
   const paperBalance = Number(document.getElementById('cfg-paper-balance').value || '100');
   const paperSessionMode = document.getElementById('cfg-paper-session-mode').value;
-  const panicHedgeEnabled = !!document.getElementById('cfg-panic-hedge').checked;
+  const panicHedgeEnabled = true;
   
   if (mode === 'live' && !pk) { alert('请先填写私钥'); return; }
   if (mode === 'live' && !fa) { alert('请先填写资金地址'); return; }
@@ -670,7 +668,7 @@ function render(s) {
   }
   const currentEntrySource = formatEntrySource(s.hedgeState === 'leg1_filled' ? s.leg1EntrySource : '');
   const srcEl = document.getElementById('h-entry-source');
-  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='恐慌对冲'?'#ff8a5b':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
+  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='恐慌对冲'?'#ff8a5b':currentEntrySource==='持仓对冲'?'#ff8a5b':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
   if (srcEl) {
     srcEl.textContent = currentEntrySource;
     srcEl.style.color = sourceColor;
@@ -785,14 +783,18 @@ function render(s) {
   if (explainerEl) {
     if (s.hedgeState === 'leg1_filled') {
       const edge = Number(s.leg1EffectiveEdge || 0);
-      explainerEl.textContent = currentEntrySource + '，方向=' + (s.hedgeLeg1Dir || '--') + '，净edge=' + (edge>=0?'+':'') + (edge*100).toFixed(1) + '%。风险=' + riskLabel + '，趋势/衍生品只做刹车和仓位加减。';
+      const hedgeExplain = s.panicHedgeActive ? (' 已触发持仓对冲 ' + (s.panicHedgeDir||'--').toUpperCase() + ' ' + Math.round(Number(s.panicHedgeRatio||0)*100) + '%。') : '';
+      explainerEl.textContent = currentEntrySource + '，方向=' + (s.hedgeLeg1Dir || '--') + '，净edge=' + (edge>=0?'+':'') + (edge*100).toFixed(1) + '%。风险=' + riskLabel + '，趋势/衍生品只做刹车和仓位加减。' + hedgeExplain;
     } else {
       explainerEl.textContent = '当前无持仓。策略=错价优先；若薄错价明显买反，且反方向高价票也有EV+，允许小仓反向赌赢。';
     }
   }
   if (s.hedgeLeg1Price>0) {
     const posEdge = Number(s.leg1EffectiveEdge || 0);
-    document.getElementById('h-leg1').innerHTML='<span class="tag tag-b">'+s.hedgeLeg1Dir+' @\$'+s.hedgeLeg1Price.toFixed(2)+' edge'+(posEdge>=0?'+':'')+(posEdge*100).toFixed(1)+'%</span>';
+    const hedgePart = s.panicHedgeActive
+      ? (' + hedge '+(s.panicHedgeDir||'--')+' @\\$'+Number(s.panicHedgeFillPrice||0).toFixed(2)+' x'+Number(s.panicHedgeShares||0).toFixed(0)+' ('+Math.round(Number(s.panicHedgeRatio||0)*100)+'%)')
+      : '';
+    document.getElementById('h-leg1').innerHTML='<span class="tag tag-b">'+s.hedgeLeg1Dir+' @\\$'+s.hedgeLeg1Price.toFixed(2)+' edge'+(posEdge>=0?'+':'')+(posEdge*100).toFixed(1)+'%'+hedgePart+'</span>';
   } else {
     document.getElementById('h-leg1').textContent='--';
   }

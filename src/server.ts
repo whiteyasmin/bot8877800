@@ -110,6 +110,7 @@ function formatEntrySource(source: unknown): string {
   if (value === "directional-reactive") return "趋势入场";
   if (value === "reactive-mispricing") return "错价入场";
   if (value === "panic-hedge") return "恐慌对冲";
+  if (value === "panic-hedge-post") return "持仓对冲";
   if (value === "counter-win") return "反向赌赢";
   if (value === "dual-side-preorder") return "预挂入场";
   return value || "-";
@@ -160,7 +161,7 @@ app.get("/api/audit", auth, (_req, res) => {
 
 app.post("/api/start", auth, async (req, res) => {
   if (bot.running) {
-    res.status(400).json({ error: "Bot is already running" });
+    res.status(400).json({ error: "机器人已在运行" });
     return;
   }
   const { privateKey, funderAddress, mode, paperBalance, paperSessionMode,
@@ -213,7 +214,7 @@ app.get("/api/download-all", auth, (_req, res) => {
     historyRows = Array.isArray(raw) ? raw : Array.isArray(raw.history) ? raw.history : [];
   } catch { /* empty */ }
 
-  const hHeader = "| # | 鏃堕棿 | 缁撴灉 | 鏂瑰悜 | 鍏ュ満浠?| 浠芥暟 | 鎴愭湰 | 鐩堜簭 | 绱 | 鏉ユ簮 | 瓒嬪娍 | 鍓╀綑绉?| 閫€鍑虹悊鐢?|";
+  const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出原因 |";
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
     const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
@@ -228,7 +229,7 @@ app.get("/api/download-all", auth, (_req, res) => {
     decisions = raw.split("\n").filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) as Array<Record<string, unknown>>;
   } catch { /* empty */ }
 
-  const dHeader = "| # | 鏃堕棿 | 浜嬩欢 | 璇︽儏 |";
+  const dHeader = "| # | 时间 | 事件 | 详情 |";
   const dSep    = "|---|------|------|------|";
   const dRows = decisions.map((d: any, i: number) => {
     const { ts, event, ...rest } = d;
@@ -246,31 +247,31 @@ app.get("/api/download-all", auth, (_req, res) => {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const state = bot.getState();
   const summary = [
-    `- 浣欓: $${state.balance.toFixed(2)}`,
-    `- 鎬荤泩浜? $${state.totalProfit.toFixed(2)}`,
-    `- 鎴樼哗: ${state.wins}W / ${state.losses}L / ${state.skips}S`,
+    `- 余额: $${state.balance.toFixed(2)}`,
+    `- 总盈亏: $${state.totalProfit.toFixed(2)}`,
+    `- 战绩: ${state.wins}W / ${state.losses}L / ${state.skips}S`,
     `- ROI: ${(state.sessionROI || 0).toFixed(1)}%`,
-    `- 妯″紡: ${state.tradingMode}`,
+    `- 模式: ${state.tradingMode}`,
   ].join("\n");
 
   const md = [
-    `# Vortex-15m 瀵煎嚭鎶ュ憡`,
+    `# Vortex-15m 导出报告`,
     `> ${new Date().toISOString()}`,
     ``,
-    `## 姒傝`,
+    `## 概览`,
     summary,
     ``,
-    `## 浜ゆ槗鍘嗗彶 (${historyRows.length}鏉?`,
+    `## 交易历史 (${historyRows.length}条)`,
     hHeader,
     hSep,
     ...hRows,
     ``,
-    `## 鍐崇瓥瀹¤ (${decisions.length}鏉?`,
+    `## 决策审计 (${decisions.length}条)`,
     dHeader,
     dSep,
     ...dRows,
     ``,
-    `## 鏃ュ織 (鏈€杩?00琛?`,
+    `## 日志 (最近500行)`,
     "```",
     logLines,
     "```",

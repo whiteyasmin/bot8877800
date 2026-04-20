@@ -20,6 +20,13 @@ export interface PaperRuntimeState {
     roundStartBtcPrice: number;
     entrySource: string;
     filledAt: number;
+    panicHedgeActive?: boolean;
+    panicHedgeDir?: string;
+    panicHedgeToken?: string;
+    panicHedgeShares?: number;
+    panicHedgeFillPrice?: number;
+    panicHedgeCost?: number;
+    panicHedgeOrderId?: string;
   } | null;
 }
 
@@ -54,6 +61,13 @@ export function loadPaperRuntimeState(): PaperRuntimeState | null {
         roundStartBtcPrice: Number(raw.openPosition.roundStartBtcPrice) || 0,
         entrySource: String(raw.openPosition.entrySource || ""),
         filledAt: Number(raw.openPosition.filledAt) || 0,
+        panicHedgeActive: !!raw.openPosition.panicHedgeActive,
+        panicHedgeDir: String(raw.openPosition.panicHedgeDir || ""),
+        panicHedgeToken: String(raw.openPosition.panicHedgeToken || ""),
+        panicHedgeShares: Number(raw.openPosition.panicHedgeShares) || 0,
+        panicHedgeFillPrice: Number(raw.openPosition.panicHedgeFillPrice) || 0,
+        panicHedgeCost: Number(raw.openPosition.panicHedgeCost) || 0,
+        panicHedgeOrderId: String(raw.openPosition.panicHedgeOrderId || ""),
       } : null,
     };
   } catch {
