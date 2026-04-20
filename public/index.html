@@ -380,8 +380,6 @@ let latestState = null;
 function formatEntrySource(source) {
   if (source === 'directional-reactive') return '趋势入场';
   if (source === 'reactive-mispricing') return '错价入场';
-  if (source === 'panic-hedge') return '恐慌对冲';
-  if (source === 'panic-hedge-post') return '持仓对冲';
   if (source === 'counter-win') return '反向赌赢';
   if (source === 'dual-side-preorder') return '预挂入场';
   return source || '--';
@@ -390,7 +388,6 @@ function formatEntrySource(source) {
 function formatStrategyMode(mode) {
   if (mode === 'trend') return '趋势辅助';
   if (mode === 'mispricing') return '错价优先';
-  if (mode === 'panic-hedge') return '恐慌对冲';
   if (mode === 'counter-win') return '反向赌赢';
   if (mode === 'none') return '待机';
   return mode || '--';
@@ -399,8 +396,6 @@ function formatStrategyMode(mode) {
 function sourcePillClass(source) {
   if (source === '趋势入场') return 'pill pill-trend';
   if (source === '错价入场') return 'pill pill-dump';
-  if (source === '恐慌对冲') return 'pill pill-dump';
-  if (source === '持仓对冲') return 'pill pill-pre';
   if (source === '反向赌赢') return 'pill pill-trend';
   if (source === '预挂入场') return 'pill pill-pre';
   return 'pill pill-idle';
@@ -436,12 +431,11 @@ async function startBot() {
   const fa = document.getElementById('cfg-fa').value.trim();
   const paperBalance = Number(document.getElementById('cfg-paper-balance').value || '100');
   const paperSessionMode = document.getElementById('cfg-paper-session-mode').value;
-  const panicHedgeEnabled = true;
   
   if (mode === 'live' && !pk) { alert('请先填写私钥'); return; }
   if (mode === 'live' && !fa) { alert('请先填写资金地址'); return; }
   try {
-    const base = { mode, paperBalance, paperSessionMode, panicHedgeEnabled };
+    const base = { mode, paperBalance, paperSessionMode };
     const payload = mode === 'paper' ? base : { ...base, privateKey: pk, funderAddress: fa };
     const r = await fetch(API+'/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),credentials:'include'});
     const d = await r.json();
@@ -658,7 +652,7 @@ function render(s) {
   const strategyLabel = s.hedgeState === 'watching' ? '错价优先' : formatStrategyMode(s.activeStrategyMode);
   const strEl = document.getElementById('h-strategy-mode');
   strEl.textContent = strategyLabel;
-  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':s.activeStrategyMode==='panic-hedge'?'#ff8a5b':s.activeStrategyMode==='counter-win'?'#f4c96b':s.activeStrategyMode==='trend'?'#76b7ff':'';
+  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':s.activeStrategyMode==='counter-win'?'#f4c96b':s.activeStrategyMode==='trend'?'#76b7ff':'';
   const trendText = {flat:'中性',up:'▲涨',down:'▼跌'}[s.trendBias]||'--';
   const trendColor = s.trendBias==='up'?'#42d392':s.trendBias==='down'?'#ff6b6b':'#8ea0b8';
   const trEl = document.getElementById('h-trend-bias');
@@ -668,7 +662,7 @@ function render(s) {
   }
   const currentEntrySource = formatEntrySource(s.hedgeState === 'leg1_filled' ? s.leg1EntrySource : '');
   const srcEl = document.getElementById('h-entry-source');
-  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='恐慌对冲'?'#ff8a5b':currentEntrySource==='持仓对冲'?'#ff8a5b':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
+  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
   if (srcEl) {
     srcEl.textContent = currentEntrySource;
     srcEl.style.color = sourceColor;
@@ -783,18 +777,14 @@ function render(s) {
   if (explainerEl) {
     if (s.hedgeState === 'leg1_filled') {
       const edge = Number(s.leg1EffectiveEdge || 0);
-      const hedgeExplain = s.panicHedgeActive ? (' 已触发持仓对冲 ' + (s.panicHedgeDir||'--').toUpperCase() + ' ' + Math.round(Number(s.panicHedgeRatio||0)*100) + '%。') : '';
-      explainerEl.textContent = currentEntrySource + '，方向=' + (s.hedgeLeg1Dir || '--') + '，净edge=' + (edge>=0?'+':'') + (edge*100).toFixed(1) + '%。风险=' + riskLabel + '，趋势/衍生品只做刹车和仓位加减。' + hedgeExplain;
+      explainerEl.textContent = currentEntrySource + '，方向=' + (s.hedgeLeg1Dir || '--') + '，净edge=' + (edge>=0?'+':'') + (edge*100).toFixed(1) + '%。风险=' + riskLabel + '，趋势/衍生品只做刹车和仓位加减。';
     } else {
       explainerEl.textContent = '当前无持仓。策略=错价优先；若薄错价明显买反，且反方向高价票也有EV+，允许小仓反向赌赢。';
     }
   }
   if (s.hedgeLeg1Price>0) {
     const posEdge = Number(s.leg1EffectiveEdge || 0);
-    const hedgePart = s.panicHedgeActive
-      ? (' + hedge '+(s.panicHedgeDir||'--')+' @\\$'+Number(s.panicHedgeFillPrice||0).toFixed(2)+' x'+Number(s.panicHedgeShares||0).toFixed(0)+' ('+Math.round(Number(s.panicHedgeRatio||0)*100)+'%)')
-      : '';
-    document.getElementById('h-leg1').innerHTML='<span class="tag tag-b">'+s.hedgeLeg1Dir+' @\\$'+s.hedgeLeg1Price.toFixed(2)+' edge'+(posEdge>=0?'+':'')+(posEdge*100).toFixed(1)+'%'+hedgePart+'</span>';
+    document.getElementById('h-leg1').innerHTML='<span class="tag tag-b">'+s.hedgeLeg1Dir+' @\$'+s.hedgeLeg1Price.toFixed(2)+' edge'+(posEdge>=0?'+':'')+(posEdge*100).toFixed(1)+'%</span>';
   } else {
     document.getElementById('h-leg1').textContent='--';
   }

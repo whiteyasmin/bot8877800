@@ -1,4 +1,4 @@
-﻿import express from "express";
+import express from "express";
 import { createServer, IncomingMessage } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import * as crypto from "crypto";
@@ -96,7 +96,7 @@ function auth(req: express.Request, res: express.Response, next: express.NextFun
   const token = parseCookies(req.headers.cookie).session;
   const expiry = sessions.get(token);
   if (!token || expiry === undefined || Date.now() > expiry) {
-    res.status(401).json({ error: "Unauthorized" });
+    res.status(401).json({ error: "未授权" });
     return;
   }
   next();
@@ -109,8 +109,6 @@ function formatEntrySource(source: unknown): string {
   const value = String(source || "");
   if (value === "directional-reactive") return "趋势入场";
   if (value === "reactive-mispricing") return "错价入场";
-  if (value === "panic-hedge") return "恐慌对冲";
-  if (value === "panic-hedge-post") return "持仓对冲";
   if (value === "counter-win") return "反向赌赢";
   if (value === "dual-side-preorder") return "预挂入场";
   return value || "-";
@@ -121,7 +119,7 @@ function formatEntrySource(source: unknown): string {
 app.post("/api/login", (req, res) => {
   const ip = (req.ip || req.socket.remoteAddress || "unknown");
   if (!checkLoginRateLimit(ip)) {
-    res.status(429).json({ error: "Too many login attempts, try again in 5 minutes" });
+    res.status(429).json({ error: "登录尝试过多，请5分钟后重试" });
     return;
   }
   pruneLoginAttempts();
@@ -132,7 +130,7 @@ app.post("/api/login", (req, res) => {
     pruneExpiredSessions();
     pruneLoginAttempts();
     if (sessions.size >= MAX_SESSIONS) {
-      res.status(503).json({ error: "Session capacity reached, please retry later" });
+      res.status(503).json({ error: "会话数已满，请稍后重试" });
       return;
     }
     sessions.set(token, Date.now() + SESSION_MAX_AGE);
@@ -141,7 +139,7 @@ app.post("/api/login", (req, res) => {
     res.json({ ok: true });
   } else {
     recordLoginFailure(ip);
-    res.status(401).json({ error: "瀵嗙爜閿欒" });
+    res.status(401).json({ error: "密码错误" });
   }
 });
 
@@ -165,13 +163,13 @@ app.post("/api/start", auth, async (req, res) => {
     return;
   }
   const { privateKey, funderAddress, mode, paperBalance, paperSessionMode,
-    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction, panicHedgeEnabled } = req.body;
+    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction } = req.body;
   const tradingMode = mode === "paper" ? "paper" : "live";
   if (privateKey) updateConfig({ PRIVATE_KEY: privateKey });
   if (funderAddress) updateConfig({ FUNDER_ADDRESS: funderAddress });
 
   if (tradingMode === "live" && (!Config.PRIVATE_KEY || !Config.FUNDER_ADDRESS)) {
-    res.status(400).json({ error: "缂哄皯绉侀挜鎴栬祫閲戝湴鍧€" });
+    res.status(400).json({ error: "缺少私钥或资金地址" });
     return;
   }
   try {
@@ -184,7 +182,6 @@ app.post("/api/start", auth, async (req, res) => {
       maxEntryAsk: maxEntryAsk != null ? Number(maxEntryAsk) : undefined,
       dualSideMaxAsk: dualSideMaxAsk != null ? Number(dualSideMaxAsk) : undefined,
       kellyFraction: kellyFraction != null ? Number(kellyFraction) : undefined,
-      panicHedgeEnabled: typeof panicHedgeEnabled === "boolean" ? panicHedgeEnabled : undefined,
     });
     res.json({
       ok: true,
@@ -207,14 +204,14 @@ app.get("/api/download-all", auth, (_req, res) => {
   const historyPath = bot.getHistoryFilePath();
   const auditPath = getDecisionAuditFilePath();
 
-  // 鈹€鈹€ History table 鈹€鈹€
+  // ── History table ──
   let historyRows: Array<Record<string, unknown>> = [];
   try {
     const raw = fs.existsSync(historyPath) ? JSON.parse(fs.readFileSync(historyPath, "utf8")) : {};
     historyRows = Array.isArray(raw) ? raw : Array.isArray(raw.history) ? raw.history : [];
   } catch { /* empty */ }
 
-  const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出原因 |";
+  const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出理由 |";
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
     const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
@@ -222,7 +219,7 @@ app.get("/api/download-all", auth, (_req, res) => {
     return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${formatEntrySource(h.entrySource)} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
   });
 
-  // 鈹€鈹€ Decision audit table 鈹€鈹€
+  // ── Decision audit table ──
   let decisions: Array<Record<string, unknown>> = [];
   try {
     const raw = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "";
@@ -237,13 +234,13 @@ app.get("/api/download-all", auth, (_req, res) => {
     return `| ${i + 1} | ${ts || ""} | ${event || ""} | ${detail.slice(0, 200)} |`;
   });
 
-  // 鈹€鈹€ Logs (last 500 lines) 鈹€鈹€
+  // ── Logs (last 500 lines) ──
   let logLines = "";
   try {
     logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8").split("\n").slice(-500).join("\n") : "";
   } catch { /* empty */ }
 
-  // 鈹€鈹€ Assemble Markdown 鈹€鈹€
+  // ── Assemble Markdown ──
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const state = bot.getState();
   const summary = [
@@ -258,7 +255,7 @@ app.get("/api/download-all", auth, (_req, res) => {
     `# Vortex-15m 导出报告`,
     `> ${new Date().toISOString()}`,
     ``,
-    `## 概览`,
+    `## 概要`,
     summary,
     ``,
     `## 交易历史 (${historyRows.length}条)`,
@@ -286,7 +283,7 @@ app.get("/api/download-all", auth, (_req, res) => {
 app.get("/api/download-logs", auth, (_req, res) => {
   const logPath = getLogFilePath();
   if (!fs.existsSync(logPath)) {
-    res.status(404).json({ error: "Log file not found" });
+    res.status(404).json({ error: "日志文件未找到" });
     return;
   }
   const raw = fs.readFileSync(logPath, "utf-8");
@@ -300,7 +297,7 @@ app.get("/api/download-logs", auth, (_req, res) => {
 app.get("/api/download-history", auth, (_req, res) => {
   const historyPath = bot.getHistoryFilePath();
   if (!fs.existsSync(historyPath)) {
-    res.status(404).json({ error: "History file not found" });
+    res.status(404).json({ error: "历史文件未找到" });
     return;
   }
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -311,7 +308,7 @@ app.get("/api/download-history", auth, (_req, res) => {
 app.get("/api/download-decision-audit", auth, (_req, res) => {
   const auditPath = getDecisionAuditFilePath();
   if (!fs.existsSync(auditPath)) {
-    res.status(404).json({ error: "Decision audit file not found" });
+    res.status(404).json({ error: "审计日志文件未找到" });
     return;
   }
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -351,10 +348,7 @@ setInterval(() => {
 export function startServer(): void {
   const port = ServerConfig.PORT;
   server.listen(port, () => {
-    console.log(`15鍒嗛挓瀵瑰啿鏈哄櫒浜洪潰鏉? http://localhost:${port}`);
+    console.log(`15分钟对冲机器人面板: http://localhost:${port}`);
     logger.info(`Server started on port ${port}`);
   });
 }
-
-
-
