@@ -26,7 +26,7 @@ import {
 } from "./strategyEngine";
 import { Trader, type TraderDiagnostics } from "./trader";
 
-const DIRECTIONAL_REACTIVE_ENABLED = false;
+const DIRECTIONAL_REACTIVE_ENABLED = true;
 const DISABLE_DUAL_SIDE_PREORDER = true;
 const DIRECTIONAL_MIN_POSITIVE_EDGE = 0.01;
 const DIRECTIONAL_SMALL_EDGE = 0.03;
@@ -34,6 +34,10 @@ const DIRECTIONAL_MEDIUM_EDGE = 0.05;
 const DIRECTIONAL_SMALL_BUDGET_SCALE = 0.35;
 const DIRECTIONAL_MEDIUM_BUDGET_SCALE = 0.60;
 const DIRECTIONAL_CHASE_MOMENTUM = 0.0012;
+const DIRECTIONAL_TREND_MIN_BTC_MOVE = 0.0008;
+const DIRECTIONAL_TREND_MIN_EDGE = 0.02;
+const DIRECTIONAL_TREND_MAX_ASK = 0.72;
+const DIRECTIONAL_TREND_PULLBACK_MAX_ASK = 0.58;
 const MISPRICING_MIN_EDGE = 0.03;
 const MISPRICING_STRONG_DROP = 0.12;
 const MISPRICING_LOW_PRICE = 0.22;
@@ -43,6 +47,13 @@ const MISPRICING_NORMAL_EDGE = 0.08;
 const MISPRICING_FAST_LANE_EDGE = 0.12;
 const MISPRICING_LOW_TICKET_EDGE = 0.12;
 const MISPRICING_ABSOLUTE_MIN_ASK = 0.06;
+const MISPRICING_COUNTER_BTC_MOVE = 0.0005;
+const MISPRICING_COUNTER_BTC_MIN_EDGE = MISPRICING_NORMAL_EDGE;
+const MISPRICING_STRONG_COUNTER_MIN_EDGE = 0.18;
+const MISPRICING_STRONG_COUNTER_MAX_ASK = 0.15;
+const MISPRICING_UNFAVORED_FAIR = 0.30;
+const MISPRICING_DEEP_UNFAVORED_FAIR = 0.25;
+const MISPRICING_DEEP_UNFAVORED_MIN_EDGE = MISPRICING_FAST_LANE_EDGE;
 const COUNTER_WIN_ENABLED = true;
 const COUNTER_WIN_MIN_EDGE = 0.02;
 const COUNTER_WIN_STRONG_EDGE = 0.05;
@@ -1757,17 +1768,34 @@ export class Hedge15mEngine {
     const buyToken = dir === "up" ? rnd.upToken : rnd.downToken;
     if (askPrice <= 0 || !buyToken) return;
 
-     const shortMomentum = getRecentMomentum(60);
-     const isChasingImpulse = (dir === "up" && shortMomentum >= DIRECTIONAL_CHASE_MOMENTUM)
-       || (dir === "down" && shortMomentum <= -DIRECTIONAL_CHASE_MOMENTUM);
-     if (isChasingImpulse && askPrice > 0.22) {
-       const skipKey = `dir-pullback:${dir}:${Math.floor(shortMomentum * 100000)}`;
-       if (skipKey !== this.lastSignalSkipKey) {
-         this.lastSignalSkipKey = skipKey;
-         logger.info(`HEDGE15M DIRECTIONAL WAIT: ${dir} impulse ${(shortMomentum * 100).toFixed(3)}%/60s, waiting for pullback`);
-       }
-       return;
-     }
+    const btcMovePct = getBtcMovePct();
+    const shortMomentum = getRecentMomentum(60);
+    const trendMomentum = getRecentMomentum(TREND_WINDOW_SEC);
+    const isChasingImpulse = (dir === "up" && shortMomentum >= DIRECTIONAL_CHASE_MOMENTUM)
+      || (dir === "down" && shortMomentum <= -DIRECTIONAL_CHASE_MOMENTUM);
+    const maxTrendAsk = isChasingImpulse ? DIRECTIONAL_TREND_PULLBACK_MAX_ASK : DIRECTIONAL_TREND_MAX_ASK;
+    if (btcMovePct < DIRECTIONAL_TREND_MIN_BTC_MOVE) return;
+    if (askPrice > maxTrendAsk) {
+      const skipKey = `dir-ask:${dir}:${askPrice.toFixed(2)}:${isChasingImpulse ? "impulse" : "trend"}`;
+      if (skipKey !== this.lastSignalSkipKey) {
+        this.lastSignalSkipKey = skipKey;
+        logger.info(`HEDGE15M DIRECTIONAL WAIT: ${dir.toUpperCase()} ask=${askPrice.toFixed(2)} > ${maxTrendAsk.toFixed(2)}${isChasingImpulse ? " (impulse pullback)" : ""}`);
+      }
+      return;
+    }
+
+    const bsEntry = this.evaluateBsEntry(dir, askPrice, rnd.secondsLeft, "trend", true);
+    if (!bsEntry.allowed || bsEntry.effectiveEdge < DIRECTIONAL_TREND_MIN_EDGE) {
+      this.trackRoundRejectReason(`trend-edge: ${(bsEntry.effectiveEdge * 100).toFixed(1)}% < ${(DIRECTIONAL_TREND_MIN_EDGE * 100).toFixed(0)}%`);
+      const skipKey = `dir-edge:${dir}:${askPrice.toFixed(2)}:${Math.floor(bsEntry.effectiveEdge * 1000)}`;
+      if (skipKey !== this.lastSignalSkipKey) {
+        this.lastSignalSkipKey = skipKey;
+        logger.info(`HEDGE15M DIRECTIONAL SKIP: ${dir.toUpperCase()} edge ${(bsEntry.effectiveEdge * 100).toFixed(1)}% < ${(DIRECTIONAL_TREND_MIN_EDGE * 100).toFixed(0)}% fair=${bsEntry.fairRaw.toFixed(3)} ask=${askPrice.toFixed(2)}`);
+      }
+      return;
+    }
+
+    logger.info(`HEDGE15M DIRECTIONAL ENTRY: ${dir.toUpperCase()} ask=${askPrice.toFixed(2)} edge=${(bsEntry.effectiveEdge * 100).toFixed(1)}% BTCmove=${(btcMovePct * 100).toFixed(3)}% m60=${(shortMomentum * 100).toFixed(3)}% m180=${(trendMomentum * 100).toFixed(3)}%`);
 
     await this.buyLeg1(trader, rnd, dir, askPrice, buyToken, "trend", "directional-reactive");
   }
@@ -1914,6 +1942,31 @@ export class Hedge15mEngine {
         return;
       }
     }
+    if (strategyMode === "mispricing") {
+      const btcDir = getBtcDirection();
+      const btcMovePct = getBtcMovePct();
+      const counterBtc = btcMovePct >= MISPRICING_COUNTER_BTC_MOVE && btcDir !== dir;
+      const alignmentScore = this.dirAlignedCount - this.dirContraCount;
+      const strongCounterSignal = alignmentScore <= MISPRICING_STRONG_CONTRA_SCORE && counterBtc;
+      const deepUnfavored = bsFairRaw < MISPRICING_DEEP_UNFAVORED_FAIR;
+      const unfavored = bsFairRaw < MISPRICING_UNFAVORED_FAIR;
+      const requiredCounterEdge = deepUnfavored
+        ? MISPRICING_DEEP_UNFAVORED_MIN_EDGE
+        : strongCounterSignal && askPrice > MISPRICING_STRONG_COUNTER_MAX_ASK
+          ? MISPRICING_STRONG_COUNTER_MIN_EDGE
+        : counterBtc || unfavored
+          ? MISPRICING_COUNTER_BTC_MIN_EDGE
+          : 0;
+      if (requiredCounterEdge > 0 && bsEdgeNet < requiredCounterEdge) {
+        this.trackRoundRejectReason(`counter-wind: fair=${bsFairRaw.toFixed(3)} edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(requiredCounterEdge * 100).toFixed(0)}%`);
+        const skipKey = `counter-wind:${dir}:${btcDir}:${Math.floor(btcMovePct * 100000)}:${Math.floor(bsEdgeNet * 1000)}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M MISPRICING SKIP: counter-wind ${dir.toUpperCase()} vs BTC=${btcDir} move=${(btcMovePct * 100).toFixed(3)}% fair=${bsFairRaw.toFixed(3)} edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(requiredCounterEdge * 100).toFixed(0)}%`);
+        }
+        return;
+      }
+    }
     if (strategyMode === "mispricing" && askPrice < MIN_ENTRY_ASK && bsEdgeNet < MISPRICING_LOW_TICKET_EDGE) {
       this.trackRoundRejectReason(`low-ticket-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(MISPRICING_LOW_TICKET_EDGE * 100).toFixed(0)}%`);
       const skipKey = `low-ticket:${dir}:${askPrice.toFixed(2)}:${Math.floor(bsEdgeNet * 1000)}`;
@@ -2038,6 +2091,7 @@ export class Hedge15mEngine {
     if (strategyMode === "trend") {
       if (bsEdgeNet < DIRECTIONAL_SMALL_EDGE) budgetPct *= DIRECTIONAL_SMALL_BUDGET_SCALE;
       else if (bsEdgeNet < DIRECTIONAL_MEDIUM_EDGE) budgetPct *= DIRECTIONAL_MEDIUM_BUDGET_SCALE;
+      budgetPct = Math.min(0.16, budgetPct);
     }
     if (strategyMode === "counter-win") {
       budgetPct = Math.min(COUNTER_WIN_MAX_BUDGET_PCT, budgetPct);
