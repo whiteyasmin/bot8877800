@@ -122,6 +122,30 @@ header h1{font-size:15px;letter-spacing:.03em}
 .hero3 .box{padding:8px 10px;border-radius:8px;background:rgba(8,15,24,.8);border:1px solid rgba(30,45,66,.6)}
 .hero3 .box .eye{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
 .hero3 .box .big{margin-top:3px;font:700 16px var(--mono)}
+.hero4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.hero4 .box{padding:8px 10px;border-radius:8px;background:rgba(8,15,24,.8);border:1px solid rgba(30,45,66,.6)}
+.hero4 .box .eye{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.hero4 .box .big{margin-top:3px;font:700 15px var(--mono)}
+.decision-lamp{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  margin-bottom:8px;padding:10px 12px;border-radius:10px;
+  border:1px solid rgba(30,45,66,.6);background:rgba(8,15,24,.72)
+}
+.decision-lamp .left{display:flex;flex-direction:column;gap:2px}
+.decision-lamp .eyebrow{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.decision-lamp .headline{font:700 18px var(--mono)}
+.decision-lamp .sub{font-size:11px;color:var(--muted)}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;
+  font-size:11px;line-height:1;border:1px solid transparent
+}
+.pill::before{content:"";width:7px;height:7px;border-radius:999px;background:currentColor}
+.pill-trend{color:var(--blue);background:rgba(118,183,255,.08);border-color:rgba(118,183,255,.18)}
+.pill-dump{color:var(--green);background:rgba(66,211,146,.08);border-color:rgba(66,211,146,.18)}
+.pill-pre{color:var(--yellow);background:rgba(244,201,107,.08);border-color:rgba(244,201,107,.18)}
+.pill-idle{color:var(--muted);background:rgba(122,142,166,.08);border-color:rgba(122,142,166,.16)}
+.panel-note{margin-top:8px;padding:8px;border-radius:8px;background:rgba(8,15,24,.6);border:1px solid rgba(30,45,66,.45);font-size:11px}
+.panel-note .title{color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-size:10px;margin-bottom:4px}
 
 /* Config grid */
 .cfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -147,6 +171,7 @@ tr:hover{background:rgba(118,183,255,.03)}
   .stat-strip{flex-wrap:wrap}
   .stat-strip .cell{flex:1 1 48%}
   .kv{grid-template-columns:1fr}
+  .hero4{grid-template-columns:repeat(2,1fr)}
 }
 </style>
 </head>
@@ -206,11 +231,27 @@ tr:hover{background:rgba(118,183,255,.03)}
       <!-- Col 2: Position & Market -->
       <div class="card c5">
         <h3>持仓 · 盘口</h3>
+        <div class="decision-lamp">
+          <div class="left">
+            <div class="eyebrow">当前开仓判断</div>
+            <div class="headline" id="hero-decision">--</div>
+            <div class="sub" id="hero-decision-sub">等待信号...</div>
+          </div>
+          <div id="hero-source-pill" class="pill pill-idle">待机</div>
+        </div>
+        <div class="hero4">
+          <div class="box"><div class="eye">策略类型</div><div class="big" id="hero-strategy">--</div></div>
+          <div class="box"><div class="eye">入场来源</div><div class="big" id="hero-source">--</div></div>
+          <div class="box"><div class="eye">趋势偏向</div><div class="big" id="hero-trend">--</div></div>
+          <div class="box"><div class="eye">衍生品确认</div><div class="big" id="hero-derivatives">--</div></div>
+        </div>
         <div class="kv">
           <div class="r"><span class="k">状态</span><span class="v" id="h-state">--</span></div>
           <div class="r"><span class="k">模式</span><span class="v" id="h-mode">--</span></div>
           <div class="r"><span class="k">策略</span><span class="v" id="h-strategy-mode">--</span></div>
           <div class="r"><span class="k">趋势</span><span class="v" id="h-trend-bias">--</span></div>
+          <div class="r"><span class="k">来源</span><span class="v" id="h-entry-source">--</span></div>
+          <div class="r"><span class="k">衍生品偏向</span><span class="v" id="h-derivatives-bias">--</span></div>
           <div class="r"><span class="k">BTC</span><span class="v" id="h-btc">--</span></div>
           <div class="r"><span class="k">UP Ask · BS</span><span class="v" id="h-up-ev">--</span></div>
           <div class="r"><span class="k">DN Ask · BS</span><span class="v" id="h-dn-ev">--</span></div>
@@ -226,10 +267,15 @@ tr:hover{background:rgba(118,183,255,.03)}
           <div class="r"><span class="k">量能/大单</span><span class="v" id="h-vol-large">--</span></div>
           <div class="r"><span class="k">深度/强平</span><span class="v" id="h-depth-liq">--</span></div>
           <div class="r"><span class="k">资金费率</span><span class="v" id="h-funding">--</span></div>
+          <div class="r"><span class="k">持仓量/OI</span><span class="v" id="h-open-interest">--</span></div>
           <div class="r"><span class="k">信号强度</span><span class="v" id="h-signal-strength">--</span></div>
           <div class="r"><span class="k">持仓策略</span><span class="v" id="h-mid-exit">--</span></div>
           <div class="r"><span class="k">盘口异常</span><span class="v" id="h-dump">--</span></div>
           <div class="r"><span class="k">最近BSM拒绝</span><span class="v" id="h-bsm-reject">--</span></div>
+        </div>
+        <div class="panel-note">
+          <div class="title">当前持仓解释</div>
+          <div id="entry-explainer">等待入场...</div>
         </div>
         <div style="margin-top:8px;padding:8px;border-radius:6px;background:rgba(8,15,24,.6);font-size:11px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -344,6 +390,27 @@ const API = '';
 let ws = null;
 let auditTimer = null;
 let latestState = null;
+
+function formatEntrySource(source) {
+  if (source === 'directional-reactive') return '趋势入场';
+  if (source === 'reactive-mispricing') return '砸盘入场';
+  if (source === 'dual-side-preorder') return '预挂入场';
+  return source || '--';
+}
+
+function formatStrategyMode(mode) {
+  if (mode === 'trend') return '主动方向';
+  if (mode === 'mispricing') return '错价反应';
+  if (mode === 'none') return '待机';
+  return mode || '--';
+}
+
+function sourcePillClass(source) {
+  if (source === '趋势入场') return 'pill pill-trend';
+  if (source === '砸盘入场') return 'pill pill-dump';
+  if (source === '预挂入场') return 'pill pill-pre';
+  return 'pill pill-idle';
+}
 
 function fmtSecs(t) {
   const s = Math.max(0, Math.floor(t || 0));
@@ -556,12 +623,53 @@ function render(s) {
   stEl.textContent = s.status || stMap[s.hedgeState] || s.hedgeState;
   stEl.style.color = (s.status||'').includes('跳过')?'#f4c96b':'';
   document.getElementById('h-mode').textContent = s.tradingMode==='paper'?'仿真'+(s.paperSessionMode==='persistent'?'/累计':'/单次'):'实盘';
+  const strategyLabel = formatStrategyMode(s.activeStrategyMode);
   const strEl = document.getElementById('h-strategy-mode');
-  strEl.textContent = {none:'待机',mispricing:'砸盘持有'}[s.activeStrategyMode]||s.activeStrategyMode||'--';
-  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':'';
+  strEl.textContent = strategyLabel;
+  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':s.activeStrategyMode==='trend'?'#76b7ff':'';
   const trEl = document.getElementById('h-trend-bias');
   trEl.textContent = {flat:'中性',up:'▲涨',down:'▼跌'}[s.trendBias]||'--';
   trEl.style.color = s.trendBias==='up'?'#42d392':s.trendBias==='down'?'#ff6b6b':'';
+  const currentEntrySource = formatEntrySource(s.hedgeState === 'leg1_filled' ? s.leg1EntrySource : '');
+  const srcEl = document.getElementById('h-entry-source');
+  srcEl.textContent = currentEntrySource;
+  srcEl.style.color = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='砸盘入场'?'#42d392':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
+  const derivLabel = (s.derivativesBiasDirection||'flat') === 'up' ? '▲做多确认' : (s.derivativesBiasDirection||'flat') === 'down' ? '▼做空确认' : '中性';
+  const derivText = derivLabel + ' ' + ((s.derivativesBiasScore ?? 0)>=0?'+':'') + (s.derivativesBiasScore ?? 0);
+  const derivEl = document.getElementById('h-derivatives-bias');
+  derivEl.textContent = derivText;
+  derivEl.style.color = (s.derivativesBiasDirection||'flat')==='up'?'#42d392':(s.derivativesBiasDirection||'flat')==='down'?'#ff6b6b':'#8ea0b8';
+  document.getElementById('hero-strategy').textContent = strategyLabel;
+  document.getElementById('hero-strategy').style.color = strEl.style.color || '#ecf3ff';
+  document.getElementById('hero-source').textContent = currentEntrySource;
+  document.getElementById('hero-source').style.color = srcEl.style.color || '#ecf3ff';
+  document.getElementById('hero-trend').textContent = trEl.textContent;
+  document.getElementById('hero-trend').style.color = trEl.style.color || '#ecf3ff';
+  document.getElementById('hero-derivatives').textContent = derivText;
+  document.getElementById('hero-derivatives').style.color = derivEl.style.color || '#ecf3ff';
+  const sourcePill = document.getElementById('hero-source-pill');
+  sourcePill.textContent = currentEntrySource === '--' ? '待机' : currentEntrySource;
+  sourcePill.className = sourcePillClass(currentEntrySource);
+  const bestEdgePct = bestEdge > -1 ? bestEdge * 100 : null;
+  const decisionEl = document.getElementById('hero-decision');
+  const decisionSubEl = document.getElementById('hero-decision-sub');
+  if (s.hedgeState === 'leg1_filled') {
+    decisionEl.textContent = '持仓中';
+    decisionEl.style.color = '#42d392';
+    decisionSubEl.textContent = currentEntrySource + ' · ' + (s.hedgeLeg1Dir || '--') + ' · edge ' + ((Number(s.leg1EffectiveEdge||0)>=0?'+':'') + (Number(s.leg1EffectiveEdge||0)*100).toFixed(1) + '%');
+  } else if (s.trendBias !== 'flat' && bestEdgePct != null && bestEdgePct >= 1) {
+    decisionEl.textContent = '可尝试开仓';
+    decisionEl.style.color = '#76b7ff';
+    decisionSubEl.textContent = '趋势=' + trEl.textContent + ' · 最佳净edge ' + (bestEdgePct>=0?'+':'') + bestEdgePct.toFixed(1) + '% · ' + derivText;
+  } else if (s.trendBias !== 'flat') {
+    decisionEl.textContent = '等回撤';
+    decisionEl.style.color = '#f4c96b';
+    decisionSubEl.textContent = '方向明确，但当前 edge 不够好或价格偏贵';
+  } else {
+    decisionEl.textContent = '继续等待';
+    decisionEl.style.color = '#8ea0b8';
+    decisionSubEl.textContent = '趋势未明确，优先等方向和 EV 同时成立';
+  }
   document.getElementById('h-btc').textContent = s.btcPrice>0?'\$'+s.btcPrice.toLocaleString('en-US',{minimumFractionDigits:2}):'--';
   // UP/DN asks with BS net-edge
   const upA = s.upAsk>0?s.upAsk.toFixed(2):'--';
@@ -619,10 +727,19 @@ function render(s) {
   const meEl = document.getElementById('h-mid-exit');
   if (s.hedgeState === 'leg1_filled') {
     const edge = Number(s.leg1EffectiveEdge || 0);
-    const srcLabel = '砸盘持有';
+    const srcLabel = currentEntrySource;
     meEl.innerHTML = '<span class=\"tag tag-g\">'+srcLabel+' edge '+(edge>=0?'+':'')+(edge*100).toFixed(1)+'% ('+(s.leg1EdgeTier||'--')+')</span>';
   } else {
     meEl.textContent = '--'; meEl.style.color = '';
+  }
+  const explainerEl = document.getElementById('entry-explainer');
+  if (explainerEl) {
+    if (s.hedgeState === 'leg1_filled') {
+      const edge = Number(s.leg1EffectiveEdge || 0);
+      explainerEl.textContent = currentEntrySource + '，方向=' + (s.hedgeLeg1Dir || '--') + '，净edge=' + (edge>=0?'+':'') + (edge*100).toFixed(1) + '%，趋势=' + (trEl.textContent || '--') + '，衍生品=' + derivLabel;
+    } else {
+      explainerEl.textContent = '当前无持仓。优先看 趋势偏向 / 衍生品确认 / 最佳净Edge，再决定是否继续等回撤。';
+    }
   }
   if (s.hedgeLeg1Price>0) {
     const posEdge = Number(s.leg1EffectiveEdge || 0);
@@ -684,6 +801,13 @@ function render(s) {
       frEl.style.color = fe?'#ff6b6b':fd==='long_pay'?'#f4c96b':fd==='short_pay'?'#76b7ff':'#7a8ea6';
     }
   }
+  const oiEl = document.getElementById('h-open-interest');
+  if (oiEl) {
+    const chg = Number(s.openInterestChangePct || 0) * 100;
+    const regime = s.openInterestRegime || '--';
+    oiEl.textContent = s.openInterestFresh ? ((chg>=0?'+':'') + chg.toFixed(2) + '% ' + regime) : '--';
+    oiEl.style.color = regime === 'long_build' || regime === 'short_cover' ? '#42d392' : regime === 'short_build' || regime === 'long_unwind' ? '#ff6b6b' : '#8ea0b8';
+  }
   const prEl = document.getElementById('h-preorder');
   if (prEl) {
     const up=s.preOrderUpPrice||0, dn=s.preOrderDownPrice||0;
@@ -736,10 +860,11 @@ function render(s) {
     const bd = h.profitBreakdown?' title="'+h.profitBreakdown.replace(/"/g,'&quot;')+'"':'';
     const hEdge = Number(h.entryEffectiveEdge || 0);
     const hTier = h.entryEdgeTier || '--';
+    const src = formatEntrySource(h.entrySource);
     return '<tr><td>'+h.time+'</td>'
       +'<td><span class="tag '+cls+'">'+h.result+'</span>'+est+'</td>'
       +'<td>'+h.leg1Dir+'</td>'
-      +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+(h.leg1Shares||0).toFixed(0)+'</small></td>'
+      +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+(h.leg1Shares||0).toFixed(0)+' · '+src+'</small></td>'
       +'<td style="color:'+(hEdge>=0.15?'#42d392':hEdge>=0.08?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
       +'<td>\$'+(h.totalCost||0).toFixed(2)+'</td>'
       +'<td style="color:'+(h.profit>=0?'#42d392':'#ff6b6b')+'"'+bd+'>'+pf+'</td>'
