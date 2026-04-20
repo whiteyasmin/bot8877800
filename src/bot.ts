@@ -49,6 +49,15 @@ const COUNTER_WIN_STRONG_EDGE = 0.05;
 const COUNTER_WIN_MIN_ASK = 0.55;
 const COUNTER_WIN_MAX_ASK = 0.86;
 const COUNTER_WIN_MAX_BUDGET_PCT = 0.14;
+const DOJI_LN_MONEYNESS = 0.0001;
+const NEAR_DOJI_LN_MONEYNESS = 0.0003;
+const DOJI_MAX_BUDGET_PCT = 0.08;
+const NEAR_DOJI_MAX_BUDGET_PCT = 0.12;
+const DOJI_HIGH_ASK_CUTOFF = 0.20;
+const DOJI_HIGH_ASK_MAX_BUDGET_PCT = 0.08;
+const EARLY_SMALL_EDGE_SECS_LEFT = 780;
+const EARLY_SMALL_EDGE_MIN_EDGE = MISPRICING_NORMAL_EDGE;
+const EARLY_COUNTER_MOMENTUM_MIN_EDGE = MISPRICING_FAST_LANE_EDGE;
 
 // ── 15分钟对冲机器人参数 (延迟相关参数由 getDynamicParams() 提供) ──
 const MIN_SHARES      = 3;        // 最少3份, 低于此不开仓 (从5降低, 避免小余额死循环)
@@ -766,6 +775,7 @@ export class Hedge15mEngine {
     fairRaw: number;
     fairKelly: number;
     dAbs: number;
+    lnMoneyness: number;
     effectiveCost: number;
     effectiveEdge: number;
     reason: string;
@@ -789,21 +799,21 @@ export class Hedge15mEngine {
       dynamicMinEdge = dynamicMinEdge + (mode === "trend" ? 0.01 : mode === "mispricing" || mode === "counter-win" ? 0.01 : 0.02); 
     }
     if (effectiveEdge < dynamicMinEdge) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
+      return { allowed: false, fairRaw, fairKelly, dAbs, lnMoneyness, effectiveCost, effectiveEdge, reason: `net-edge<${(dynamicMinEdge*100).toFixed(0)}%` };
     }
     // Doji检测: 用 |ln(S/K)| (BTC偏离幅度) 而非 |d| (σ√T归一化后的值)
     // 15分钟期权σ√T≈0.003, BTC偏$15→|d|=0.06但|ln(S/K)|=0.00015
     // 旧阈值|d|<0.05误杀: BTC偏$10就触发doji (砸盘场景BTC可能确实没大动)
     // 新阈值: |ln(S/K)|<0.0001 (BTC偏<0.01%≈$10) 才是真doji
-    if (lnMoneyness < 0.0001 && effectiveEdge < 0.18) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "doji-net-edge<18%" };
+    if (lnMoneyness < DOJI_LN_MONEYNESS && effectiveEdge < 0.18) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, lnMoneyness, effectiveCost, effectiveEdge, reason: "doji-net-edge<18%" };
     }
     // near-doji: BTC偏<0.03% (≈$30) — 方向不明确, 要求更高edge
-    if (lnMoneyness < 0.0003 && effectiveEdge < 0.12) {
-      return { allowed: false, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "near-doji-net-edge<12%" };
+    if (lnMoneyness < NEAR_DOJI_LN_MONEYNESS && effectiveEdge < 0.12) {
+      return { allowed: false, fairRaw, fairKelly, dAbs, lnMoneyness, effectiveCost, effectiveEdge, reason: "near-doji-net-edge<12%" };
     }
 
-    return { allowed: true, fairRaw, fairKelly, dAbs, effectiveCost, effectiveEdge, reason: "ok" };
+    return { allowed: true, fairRaw, fairKelly, dAbs, lnMoneyness, effectiveCost, effectiveEdge, reason: "ok" };
   }
 
   private rankMispricingCandidates(candidates: MispricingCandidate[], secsLeft: number): MispricingCandidate[] {
@@ -832,6 +842,7 @@ export class Hedge15mEngine {
     result: {
       fairRaw: number;
       dAbs: number;
+      lnMoneyness?: number;
       effectiveCost: number;
       effectiveEdge: number;
       reason: string;
@@ -1861,6 +1872,21 @@ export class Hedge15mEngine {
     const bsFairRaw = bsEntry.fairRaw;
     const bsWinRate = bsEntry.fairKelly;
     const bsEdgeNet = bsEntry.effectiveEdge;
+    const dojiRegime = bsEntry.lnMoneyness < DOJI_LN_MONEYNESS ? "doji" : bsEntry.lnMoneyness < NEAR_DOJI_LN_MONEYNESS ? "near-doji" : "directional";
+    if (strategyMode === "mispricing" && rnd.secondsLeft > EARLY_SMALL_EDGE_SECS_LEFT) {
+      const shortMomentum = getRecentMomentum(MOMENTUM_WINDOW_SEC);
+      const counterShortMomentum = (dir === "up" && shortMomentum < 0) || (dir === "down" && shortMomentum > 0);
+      const earlyMinEdge = counterShortMomentum ? EARLY_COUNTER_MOMENTUM_MIN_EDGE : EARLY_SMALL_EDGE_MIN_EDGE;
+      if (bsEdgeNet < earlyMinEdge) {
+        this.trackRoundRejectReason(`early-small-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(earlyMinEdge * 100).toFixed(0)}%`);
+        const skipKey = `early-edge:${dir}:${Math.floor(rnd.secondsLeft)}:${Math.floor(bsEdgeNet * 1000)}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M MISPRICING SKIP: early ${Math.floor(rnd.secondsLeft)}s edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(earlyMinEdge * 100).toFixed(0)}%${counterShortMomentum ? " (counter-momentum)" : ""}`);
+        }
+        return;
+      }
+    }
     if (strategyMode === "mispricing" && askPrice < MIN_ENTRY_ASK && bsEdgeNet < MISPRICING_LOW_TICKET_EDGE) {
       this.trackRoundRejectReason(`low-ticket-edge: ${(bsEdgeNet * 100).toFixed(1)}% < ${(MISPRICING_LOW_TICKET_EDGE * 100).toFixed(0)}%`);
       const skipKey = `low-ticket:${dir}:${askPrice.toFixed(2)}:${Math.floor(bsEdgeNet * 1000)}`;
@@ -1988,6 +2014,16 @@ export class Hedge15mEngine {
     }
     if (strategyMode === "counter-win") {
       budgetPct = Math.min(COUNTER_WIN_MAX_BUDGET_PCT, budgetPct);
+    }
+    if (strategyMode === "mispricing" && dojiRegime !== "directional") {
+      let dojiCap = dojiRegime === "doji" ? DOJI_MAX_BUDGET_PCT : NEAR_DOJI_MAX_BUDGET_PCT;
+      if (askPrice > DOJI_HIGH_ASK_CUTOFF) {
+        dojiCap = Math.min(dojiCap, DOJI_HIGH_ASK_MAX_BUDGET_PCT);
+      }
+      if (budgetPct > dojiCap) {
+        logger.info(`DOJI SIZE CAP: ${dojiRegime} ln=${bsEntry.lnMoneyness.toFixed(6)} ask=${askPrice.toFixed(2)} edge=${(bsEdgeNet * 100).toFixed(1)}% pct ${(budgetPct * 100).toFixed(1)}% -> ${(dojiCap * 100).toFixed(1)}%`);
+        budgetPct = dojiCap;
+      }
     }
 
     await this.openLeg1Position(
@@ -2628,6 +2664,7 @@ export class Hedge15mEngine {
     bsEntry?: {
       fairRaw: number;
       fairKelly: number;
+      lnMoneyness?: number;
       effectiveCost: number;
       effectiveEdge: number;
     },

@@ -473,7 +473,7 @@ function summarizeWinRate(items) {
 
 async function refreshAudit() {
   try {
-    if (latestState) { renderDirectionalAudit(latestState.history || []); if (!auditTimer) auditTimer = setInterval(refreshAudit, 15000); return; }
+    if (latestState) { renderDirectionalAudit(latestState.history || []); renderHistoryTable(latestState.history || []); if (!auditTimer) auditTimer = setInterval(refreshAudit, 15000); return; }
     const r = await fetch(API+'/api/audit',{credentials:'include'});
     if (!r.ok) return;
     const a = await r.json();
@@ -490,8 +490,45 @@ async function refreshAudit() {
     wEl.textContent = a.warnings && a.warnings.length ? a.warnings[0] : '无';
     wEl.title = a.warnings && a.warnings.length ? a.warnings.join('\n') : '';
     wEl.style.color = a.warnings && a.warnings.length ? '#ff6b6b' : '#42d392';
+    renderHistoryTable(a.history || []);
     if (!auditTimer) auditTimer = setInterval(refreshAudit, 15000);
   } catch {}
+}
+
+function renderHistoryTable(history) {
+  const tbody = document.getElementById('history-body');
+  if (!tbody) return;
+  const rows = (history || []).slice().reverse().slice(0,50);
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:#7a8ea6;text-align:center;padding:12px">暂无交易历史，等待结算后显示</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(h => {
+    const cls = h.result==='WIN'?'tag-g':'tag-r';
+    const profit = Number(h.profit || 0);
+    const pf = profit>=0?'+\$'+profit.toFixed(2):'-\$'+Math.abs(profit).toFixed(2);
+    const fill = Number(h.leg1FillPrice || 0);
+    const signalPrice = Number(h.leg1Price || 0);
+    const l1 = fill>0?'\$'+fill.toFixed(2):'\$'+signalPrice.toFixed(2);
+    const est = h.estimated?'<span style="color:#f4c96b" title="估算"> ⚠</span>':'';
+    const bd = h.profitBreakdown?' title="'+String(h.profitBreakdown).replace(/"/g,'&quot;')+'"':'';
+    const hEdge = Number(h.entryEffectiveEdge || 0);
+    const hTier = h.entryEdgeTier || '--';
+    const src = formatEntrySource(h.entrySource);
+    const shares = Number(h.leg1Shares || 0);
+    const totalCost = Number(h.totalCost || 0);
+    const cumProfit = Number(h.cumProfit || 0);
+    const exitReason = String(h.exitReason || '-').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return '<tr><td>'+(h.time||'--')+'</td>'
+      +'<td><span class="tag '+cls+'">'+(h.result||'--')+'</span>'+est+'</td>'
+      +'<td>'+(h.leg1Dir||'--')+'</td>'
+      +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+shares.toFixed(0)+' · '+src+'</small></td>'
+      +'<td style="color:'+(hEdge>=0.12?'#42d392':hEdge>=0.03?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
+      +'<td>\$'+totalCost.toFixed(2)+'</td>'
+      +'<td style="color:'+(profit>=0?'#42d392':'#ff6b6b')+'"'+bd+'>'+pf+'</td>'
+      +'<td style="color:'+(cumProfit>=0?'#42d392':'#ff6b6b')+'">\$'+cumProfit.toFixed(2)+'</td>'
+      +'<td style="font-size:10px;color:#7a8ea6;max-width:180px;white-space:normal;line-height:1.3">'+exitReason+'</td></tr>';
+  }).join('');
 }
 
 function renderDirectionalAudit(history) {
@@ -752,7 +789,7 @@ function render(s) {
     document.getElementById('h-leg1').textContent='--';
   }
   const xEl = document.getElementById('h-expected');
-  xEl.textContent = '错价3/8/12%；反向赌赢≥2%，强反向≥5%，ask $0.55-$0.86';
+  xEl.textContent = '错价3/8/12%；doji限仓8-12%；反向赌赢ask $0.55-$0.86';
   xEl.style.color = '#42d392';
   const scEl = document.getElementById('h-sum-confirm');
   if (scEl) {
@@ -854,28 +891,7 @@ function render(s) {
   liEl.textContent = fmtIssue(d.localBookStaleCount, d.localBookCrossedCount);
   liEl.style.color = ((d.localBookStaleCount||0)>0||(d.localBookCrossedCount||0)>0)?'#f4c96b':'#42d392';
 
-  // History table
-  const tbody = document.getElementById('history-body');
-  const rows = (s.history||[]).slice().reverse().slice(0,50);
-  tbody.innerHTML = rows.map(h => {
-    const cls = h.result==='WIN'?'tag-g':'tag-r';
-    const pf = h.profit>=0?'+\$'+h.profit.toFixed(2):'-\$'+Math.abs(h.profit).toFixed(2);
-    const l1 = h.leg1FillPrice>0?'\$'+h.leg1FillPrice.toFixed(2):'\$'+(h.leg1Price||0).toFixed(2);
-    const est = h.estimated?'<span style="color:#f4c96b" title="估算"> ⚠</span>':'';
-    const bd = h.profitBreakdown?' title="'+h.profitBreakdown.replace(/"/g,'&quot;')+'"':'';
-    const hEdge = Number(h.entryEffectiveEdge || 0);
-    const hTier = h.entryEdgeTier || '--';
-    const src = formatEntrySource(h.entrySource);
-    return '<tr><td>'+h.time+'</td>'
-      +'<td><span class="tag '+cls+'">'+h.result+'</span>'+est+'</td>'
-      +'<td>'+h.leg1Dir+'</td>'
-      +'<td>'+l1+'<small style="color:#7a8ea6"> ×'+(h.leg1Shares||0).toFixed(0)+' · '+src+'</small></td>'
-      +'<td style="color:'+(hEdge>=0.12?'#42d392':hEdge>=0.03?'#76b7ff':hEdge>=0?'#f4c96b':'#ff6b6b')+'">'+((hEdge>=0?'+':'')+(hEdge*100).toFixed(1))+'% '+hTier+'</td>'
-      +'<td>\$'+(h.totalCost||0).toFixed(2)+'</td>'
-      +'<td style="color:'+(h.profit>=0?'#42d392':'#ff6b6b')+'"'+bd+'>'+pf+'</td>'
-      +'<td style="color:'+(h.cumProfit>=0?'#42d392':'#ff6b6b')+'">\$'+(h.cumProfit||0).toFixed(2)+'</td>'
-      +'<td style="font-size:10px;color:#7a8ea6;max-width:180px;white-space:normal;line-height:1.3">'+(h.exitReason||'-')+'</td></tr>';
-  }).join('');
+  renderHistoryTable(s.history || []);
 
   renderDirectionalAudit(s.history || []);
 }
