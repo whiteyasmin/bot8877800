@@ -108,7 +108,8 @@ const bot = new Hedge15mEngine();
 function formatEntrySource(source: unknown): string {
   const value = String(source || "");
   if (value === "directional-reactive") return "趋势入场";
-  if (value === "reactive-mispricing") return "砸盘入场";
+  if (value === "reactive-mispricing") return "错价入场";
+  if (value === "counter-win") return "反向赌赢";
   if (value === "dual-side-preorder") return "预挂入场";
   return value || "-";
 }
