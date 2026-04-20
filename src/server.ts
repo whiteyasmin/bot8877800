@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import { createServer, IncomingMessage } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import * as crypto from "crypto";
@@ -96,7 +96,7 @@ function auth(req: express.Request, res: express.Response, next: express.NextFun
   const token = parseCookies(req.headers.cookie).session;
   const expiry = sessions.get(token);
   if (!token || expiry === undefined || Date.now() > expiry) {
-    res.status(401).json({ error: "未授权" });
+    res.status(401).json({ error: "Unauthorized" });
     return;
   }
   next();
@@ -109,6 +109,7 @@ function formatEntrySource(source: unknown): string {
   const value = String(source || "");
   if (value === "directional-reactive") return "趋势入场";
   if (value === "reactive-mispricing") return "错价入场";
+  if (value === "panic-hedge") return "恐慌对冲";
   if (value === "counter-win") return "反向赌赢";
   if (value === "dual-side-preorder") return "预挂入场";
   return value || "-";
@@ -119,7 +120,7 @@ function formatEntrySource(source: unknown): string {
 app.post("/api/login", (req, res) => {
   const ip = (req.ip || req.socket.remoteAddress || "unknown");
   if (!checkLoginRateLimit(ip)) {
-    res.status(429).json({ error: "登录尝试过多，请5分钟后重试" });
+    res.status(429).json({ error: "Too many login attempts, try again in 5 minutes" });
     return;
   }
   pruneLoginAttempts();
@@ -130,7 +131,7 @@ app.post("/api/login", (req, res) => {
     pruneExpiredSessions();
     pruneLoginAttempts();
     if (sessions.size >= MAX_SESSIONS) {
-      res.status(503).json({ error: "会话数已满，请稍后重试" });
+      res.status(503).json({ error: "Session capacity reached, please retry later" });
       return;
     }
     sessions.set(token, Date.now() + SESSION_MAX_AGE);
@@ -139,7 +140,7 @@ app.post("/api/login", (req, res) => {
     res.json({ ok: true });
   } else {
     recordLoginFailure(ip);
-    res.status(401).json({ error: "密码错误" });
+    res.status(401).json({ error: "瀵嗙爜閿欒" });
   }
 });
 
@@ -159,17 +160,17 @@ app.get("/api/audit", auth, (_req, res) => {
 
 app.post("/api/start", auth, async (req, res) => {
   if (bot.running) {
-    res.status(400).json({ error: "机器人已在运行" });
+    res.status(400).json({ error: "Bot is already running" });
     return;
   }
   const { privateKey, funderAddress, mode, paperBalance, paperSessionMode,
-    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction } = req.body;
+    dumpConfirmCycles, entryWindowPreset, maxEntryAsk, dualSideMaxAsk, kellyFraction, panicHedgeEnabled } = req.body;
   const tradingMode = mode === "paper" ? "paper" : "live";
   if (privateKey) updateConfig({ PRIVATE_KEY: privateKey });
   if (funderAddress) updateConfig({ FUNDER_ADDRESS: funderAddress });
 
   if (tradingMode === "live" && (!Config.PRIVATE_KEY || !Config.FUNDER_ADDRESS)) {
-    res.status(400).json({ error: "缺少私钥或资金地址" });
+    res.status(400).json({ error: "缂哄皯绉侀挜鎴栬祫閲戝湴鍧€" });
     return;
   }
   try {
@@ -182,6 +183,7 @@ app.post("/api/start", auth, async (req, res) => {
       maxEntryAsk: maxEntryAsk != null ? Number(maxEntryAsk) : undefined,
       dualSideMaxAsk: dualSideMaxAsk != null ? Number(dualSideMaxAsk) : undefined,
       kellyFraction: kellyFraction != null ? Number(kellyFraction) : undefined,
+      panicHedgeEnabled: typeof panicHedgeEnabled === "boolean" ? panicHedgeEnabled : undefined,
     });
     res.json({
       ok: true,
@@ -204,14 +206,14 @@ app.get("/api/download-all", auth, (_req, res) => {
   const historyPath = bot.getHistoryFilePath();
   const auditPath = getDecisionAuditFilePath();
 
-  // ── History table ──
+  // 鈹€鈹€ History table 鈹€鈹€
   let historyRows: Array<Record<string, unknown>> = [];
   try {
     const raw = fs.existsSync(historyPath) ? JSON.parse(fs.readFileSync(historyPath, "utf8")) : {};
     historyRows = Array.isArray(raw) ? raw : Array.isArray(raw.history) ? raw.history : [];
   } catch { /* empty */ }
 
-  const hHeader = "| # | 时间 | 结果 | 方向 | 入场价 | 份数 | 成本 | 盈亏 | 累计 | 来源 | 趋势 | 剩余秒 | 退出理由 |";
+  const hHeader = "| # | 鏃堕棿 | 缁撴灉 | 鏂瑰悜 | 鍏ュ満浠?| 浠芥暟 | 鎴愭湰 | 鐩堜簭 | 绱 | 鏉ユ簮 | 瓒嬪娍 | 鍓╀綑绉?| 閫€鍑虹悊鐢?|";
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
     const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
@@ -219,14 +221,14 @@ app.get("/api/download-all", auth, (_req, res) => {
     return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${formatEntrySource(h.entrySource)} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
   });
 
-  // ── Decision audit table ──
+  // 鈹€鈹€ Decision audit table 鈹€鈹€
   let decisions: Array<Record<string, unknown>> = [];
   try {
     const raw = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "";
     decisions = raw.split("\n").filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) as Array<Record<string, unknown>>;
   } catch { /* empty */ }
 
-  const dHeader = "| # | 时间 | 事件 | 详情 |";
+  const dHeader = "| # | 鏃堕棿 | 浜嬩欢 | 璇︽儏 |";
   const dSep    = "|---|------|------|------|";
   const dRows = decisions.map((d: any, i: number) => {
     const { ts, event, ...rest } = d;
@@ -234,41 +236,41 @@ app.get("/api/download-all", auth, (_req, res) => {
     return `| ${i + 1} | ${ts || ""} | ${event || ""} | ${detail.slice(0, 200)} |`;
   });
 
-  // ── Logs (last 500 lines) ──
+  // 鈹€鈹€ Logs (last 500 lines) 鈹€鈹€
   let logLines = "";
   try {
     logLines = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8").split("\n").slice(-500).join("\n") : "";
   } catch { /* empty */ }
 
-  // ── Assemble Markdown ──
+  // 鈹€鈹€ Assemble Markdown 鈹€鈹€
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const state = bot.getState();
   const summary = [
-    `- 余额: $${state.balance.toFixed(2)}`,
-    `- 总盈亏: $${state.totalProfit.toFixed(2)}`,
-    `- 战绩: ${state.wins}W / ${state.losses}L / ${state.skips}S`,
+    `- 浣欓: $${state.balance.toFixed(2)}`,
+    `- 鎬荤泩浜? $${state.totalProfit.toFixed(2)}`,
+    `- 鎴樼哗: ${state.wins}W / ${state.losses}L / ${state.skips}S`,
     `- ROI: ${(state.sessionROI || 0).toFixed(1)}%`,
-    `- 模式: ${state.tradingMode}`,
+    `- 妯″紡: ${state.tradingMode}`,
   ].join("\n");
 
   const md = [
-    `# Vortex-15m 导出报告`,
+    `# Vortex-15m 瀵煎嚭鎶ュ憡`,
     `> ${new Date().toISOString()}`,
     ``,
-    `## 概要`,
+    `## 姒傝`,
     summary,
     ``,
-    `## 交易历史 (${historyRows.length}条)`,
+    `## 浜ゆ槗鍘嗗彶 (${historyRows.length}鏉?`,
     hHeader,
     hSep,
     ...hRows,
     ``,
-    `## 决策审计 (${decisions.length}条)`,
+    `## 鍐崇瓥瀹¤ (${decisions.length}鏉?`,
     dHeader,
     dSep,
     ...dRows,
     ``,
-    `## 日志 (最近500行)`,
+    `## 鏃ュ織 (鏈€杩?00琛?`,
     "```",
     logLines,
     "```",
@@ -283,7 +285,7 @@ app.get("/api/download-all", auth, (_req, res) => {
 app.get("/api/download-logs", auth, (_req, res) => {
   const logPath = getLogFilePath();
   if (!fs.existsSync(logPath)) {
-    res.status(404).json({ error: "日志文件未找到" });
+    res.status(404).json({ error: "Log file not found" });
     return;
   }
   const raw = fs.readFileSync(logPath, "utf-8");
@@ -297,7 +299,7 @@ app.get("/api/download-logs", auth, (_req, res) => {
 app.get("/api/download-history", auth, (_req, res) => {
   const historyPath = bot.getHistoryFilePath();
   if (!fs.existsSync(historyPath)) {
-    res.status(404).json({ error: "历史文件未找到" });
+    res.status(404).json({ error: "History file not found" });
     return;
   }
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -308,7 +310,7 @@ app.get("/api/download-history", auth, (_req, res) => {
 app.get("/api/download-decision-audit", auth, (_req, res) => {
   const auditPath = getDecisionAuditFilePath();
   if (!fs.existsSync(auditPath)) {
-    res.status(404).json({ error: "审计日志文件未找到" });
+    res.status(404).json({ error: "Decision audit file not found" });
     return;
   }
   res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -348,7 +350,10 @@ setInterval(() => {
 export function startServer(): void {
   const port = ServerConfig.PORT;
   server.listen(port, () => {
-    console.log(`15分钟对冲机器人面板: http://localhost:${port}`);
+    console.log(`15鍒嗛挓瀵瑰啿鏈哄櫒浜洪潰鏉? http://localhost:${port}`);
     logger.info(`Server started on port ${port}`);
   });
 }
+
+
+

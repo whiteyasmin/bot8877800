@@ -321,6 +321,10 @@ tr:hover{background:rgba(118,183,255,.03)}
             <input type="number" id="cfg-paper-balance" placeholder="100" value="100" min="10" step="10">
           </div>
           <div style="grid-column: span 3; font-size:12px; color:var(--muted); margin-top:8px;">运行参数由后台策略生成 (仓位/时间窗/阈值)</div>
+          <div class="span2" style="display:flex;align-items:center;gap:8px;margin-top:2px;">
+            <input type="checkbox" id="cfg-panic-hedge" checked style="width:auto">
+            <label for="cfg-panic-hedge" style="margin:0;color:var(--text);font-size:12px">启用 Panic Hedge（恐慌对冲）</label>
+          </div>
           <div>
             <label>资金地址</label>
             <input type="text" id="cfg-fa" placeholder="0x..." autocomplete="off">
@@ -380,6 +384,7 @@ let latestState = null;
 function formatEntrySource(source) {
   if (source === 'directional-reactive') return '趋势入场';
   if (source === 'reactive-mispricing') return '错价入场';
+  if (source === 'panic-hedge') return '恐慌对冲';
   if (source === 'counter-win') return '反向赌赢';
   if (source === 'dual-side-preorder') return '预挂入场';
   return source || '--';
@@ -388,6 +393,7 @@ function formatEntrySource(source) {
 function formatStrategyMode(mode) {
   if (mode === 'trend') return '趋势辅助';
   if (mode === 'mispricing') return '错价优先';
+  if (mode === 'panic-hedge') return '恐慌对冲';
   if (mode === 'counter-win') return '反向赌赢';
   if (mode === 'none') return '待机';
   return mode || '--';
@@ -396,6 +402,7 @@ function formatStrategyMode(mode) {
 function sourcePillClass(source) {
   if (source === '趋势入场') return 'pill pill-trend';
   if (source === '错价入场') return 'pill pill-dump';
+  if (source === '恐慌对冲') return 'pill pill-dump';
   if (source === '反向赌赢') return 'pill pill-trend';
   if (source === '预挂入场') return 'pill pill-pre';
   return 'pill pill-idle';
@@ -431,11 +438,12 @@ async function startBot() {
   const fa = document.getElementById('cfg-fa').value.trim();
   const paperBalance = Number(document.getElementById('cfg-paper-balance').value || '100');
   const paperSessionMode = document.getElementById('cfg-paper-session-mode').value;
+  const panicHedgeEnabled = !!document.getElementById('cfg-panic-hedge').checked;
   
   if (mode === 'live' && !pk) { alert('请先填写私钥'); return; }
   if (mode === 'live' && !fa) { alert('请先填写资金地址'); return; }
   try {
-    const base = { mode, paperBalance, paperSessionMode };
+    const base = { mode, paperBalance, paperSessionMode, panicHedgeEnabled };
     const payload = mode === 'paper' ? base : { ...base, privateKey: pk, funderAddress: fa };
     const r = await fetch(API+'/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),credentials:'include'});
     const d = await r.json();
@@ -652,7 +660,7 @@ function render(s) {
   const strategyLabel = s.hedgeState === 'watching' ? '错价优先' : formatStrategyMode(s.activeStrategyMode);
   const strEl = document.getElementById('h-strategy-mode');
   strEl.textContent = strategyLabel;
-  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':s.activeStrategyMode==='counter-win'?'#f4c96b':s.activeStrategyMode==='trend'?'#76b7ff':'';
+  strEl.style.color = s.activeStrategyMode==='mispricing'?'#42d392':s.activeStrategyMode==='panic-hedge'?'#ff8a5b':s.activeStrategyMode==='counter-win'?'#f4c96b':s.activeStrategyMode==='trend'?'#76b7ff':'';
   const trendText = {flat:'中性',up:'▲涨',down:'▼跌'}[s.trendBias]||'--';
   const trendColor = s.trendBias==='up'?'#42d392':s.trendBias==='down'?'#ff6b6b':'#8ea0b8';
   const trEl = document.getElementById('h-trend-bias');
@@ -662,7 +670,7 @@ function render(s) {
   }
   const currentEntrySource = formatEntrySource(s.hedgeState === 'leg1_filled' ? s.leg1EntrySource : '');
   const srcEl = document.getElementById('h-entry-source');
-  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
+  const sourceColor = currentEntrySource==='趋势入场'?'#76b7ff':currentEntrySource==='错价入场'?'#42d392':currentEntrySource==='恐慌对冲'?'#ff8a5b':currentEntrySource==='反向赌赢'?'#f4c96b':currentEntrySource==='预挂入场'?'#f4c96b':'#8ea0b8';
   if (srcEl) {
     srcEl.textContent = currentEntrySource;
     srcEl.style.color = sourceColor;
