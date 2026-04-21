@@ -27,7 +27,7 @@ import {
 import { Trader, type TraderDiagnostics } from "./trader";
 
 const DIRECTIONAL_REACTIVE_ENABLED = true;
-const DISABLE_DUAL_SIDE_PREORDER = false;
+const DISABLE_DUAL_SIDE_PREORDER = true;
 const DIRECTIONAL_MIN_POSITIVE_EDGE = 0.005;
 const DIRECTIONAL_SMALL_EDGE = 0.02;
 const DIRECTIONAL_MEDIUM_EDGE = 0.04;
