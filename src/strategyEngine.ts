@@ -1,4 +1,4 @@
-﻿export type TradeDirection = "up" | "down";
+export type TradeDirection = "up" | "down";
 export type DirectionalBias = TradeDirection | "flat";
 
 export interface DirectionalBiasParams {
@@ -78,14 +78,14 @@ export function getDirectionalBias(params: DirectionalBiasParams): DirectionalBi
 
 // ask跌幅 / BTC变动 的最低比�?�?低于此值说明BTC变动可以解释ask下跌, 是正确定价而非砸盘
 // 动态化: 高波动时BTC变动�? ratio天然�? 需降低阈值避免误杀真砸�?
-const MIN_DUMP_RATIO_BASE = 20;
-const MIN_DUMP_RATIO_LOW_VOL = 25;  // BTC变动<0.05%时收�?微行情中小跌幅更可能是噪�?
-const MIN_DUMP_RATIO_HIGH_VOL = 12; // BTC变动>0.15%时放�?高波下真砸盘ratio天然�?
+const MIN_DUMP_RATIO_BASE = 10;
+const MIN_DUMP_RATIO_LOW_VOL = 12;  // BTC变动<0.05%时收�?微行情中小跌幅更可能是噪�?
+const MIN_DUMP_RATIO_HIGH_VOL = 6; // BTC变动>0.15%时放�?高波下真砸盘ratio天然�?
 // 对侧ask上涨阈�?�?一侧跌N%, 对侧�?�?N*此比�?说明市场在重定价而非恐慌
 // 分档: 大dump(�?5%)时对侧不太可能等比大�? 放松�?.75; 小dump保持0.85
-const OPPOSITE_RISE_RATIO_NORMAL = 0.85;
-const OPPOSITE_RISE_RATIO_DEEP = 0.75;   // dump�?5%�?
-const DEEP_DUMP_THRESHOLD = 0.15;
+const OPPOSITE_RISE_RATIO_NORMAL = 0.95;
+const OPPOSITE_RISE_RATIO_DEEP = 0.90;   // dump�?5%�?
+const DEEP_DUMP_THRESHOLD = 0.10;
 
 function getDynamicMinDumpRatio(btcMovePct: number): number {
   if (btcMovePct < 0.0005) return MIN_DUMP_RATIO_LOW_VOL;  // <0.05%
