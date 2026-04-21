@@ -54,6 +54,14 @@ const MISPRICING_STRONG_COUNTER_MAX_ASK = 0.15;
 const MISPRICING_UNFAVORED_FAIR = 0.30;
 const MISPRICING_DEEP_UNFAVORED_FAIR = 0.25;
 const MISPRICING_DEEP_UNFAVORED_MIN_EDGE = MISPRICING_FAST_LANE_EDGE;
+const MISPRICING_WIN_HIGH_PRICE_MIN_FAIR = 0.52;
+const MISPRICING_WIN_MID_PRICE_MIN_FAIR = 0.48;
+const MISPRICING_WIN_LOW_PRICE_MIN_FAIR = 0.42;
+const MISPRICING_WIN_LOW_PRICE_MIN_EDGE = 0.18;
+const MISPRICING_FLAT_MIN_ALIGNMENT_SCORE = 1;
+const MISPRICING_FLAT_WEAK_MAX_ASK = 0.20;
+const MISPRICING_FLAT_WEAK_MIN_EDGE = 0.16;
+const MISPRICING_FAST_TRACK_LOW_ASK = 0.18;
 const COUNTER_WIN_ENABLED = true;
 const COUNTER_WIN_MIN_EDGE = 0.02;
 const COUNTER_WIN_STRONG_EDGE = 0.05;
@@ -132,6 +140,16 @@ const MID_NET_EDGE = MISPRICING_NORMAL_EDGE;
 const HIGH_NET_EDGE = MISPRICING_FAST_LANE_EDGE;
 const BALANCE_ESTIMATE_MIN_PCT = 0.70;
 const BALANCE_ESTIMATE_MAX_PCT = 1.15;
+
+// ── 对冲止损: Leg1 明显失势时买入反向腿, 将满亏风险转为锁定亏损 ──
+const HEDGE_STOP_ENABLED = true;
+const HEDGE_STOP_MIN_SECS_LEFT = 45;         // 最后45秒不追对冲, 避免成交/结算竞态
+const HEDGE_STOP_MAX_OPP_ASK = 0.82;         // 反向腿过贵时不对冲, 否则锁亏过深
+const HEDGE_STOP_LEG1_BID_TRIGGER = 0.28;    // Leg1 bid 跌破此值视为明显失势
+const HEDGE_STOP_ADVERSE_BTC_PCT = 0.0008;   // BTC 相对开盘反向超过0.08%时可触发
+const HEDGE_STOP_MAX_LOCKED_LOSS_PCT = 0.55; // 锁定亏损不能超过已投入成本的55%
+const HEDGE_STOP_MIN_LOCK_SAVINGS = 1.00;    // 相比不对冲至少减少$1风险
+const HEDGE_STOP_TAKER_FEE = TAKER_FEE;
 
 // ── 资金安全守护 ──
 const MIN_BALANCE_TO_TRADE = 5;             // 余额<$5停止交易 (不够开最小仓)
@@ -242,6 +260,11 @@ export interface Hedge15mState {
   rtMaxEntryAsk: number;
   rtDualSideMaxAsk: number;
   rtKellyFraction: number;
+  hedgeStopEnabled: boolean;
+  hedgeStopLeg2Dir: string;
+  hedgeStopLeg2Price: number;
+  hedgeStopLeg2Shares: number;
+  hedgeStopLockedPnl: number;
   latencyP50: number;
   latencyP90: number;
   latencyNetworkSource: string;
@@ -313,6 +336,11 @@ export interface HedgeHistoryEntry {
   exitReason?: string;      // 人类可读退出理由
   leg1Shares?: number;      // Leg1 实际成交份数
   leg1FillPrice?: number;   // Leg1 真实平均成交价
+  leg2Dir?: string;         // 对冲止损反向腿方向
+  leg2Shares?: number;      // 对冲止损反向腿份数
+  leg2FillPrice?: number;   // 对冲止损反向腿均价
+  leg2OrderId?: string;     // 对冲止损反向腿订单
+  hedgeLockedPnl?: number;  // 对冲后理论锁定盈亏
   orderId?: string;         // 关联订单ID (截取前12位)
   estimated?: boolean;      // 是否含估算数据
   profitBreakdown?: string; // 盈亏计算明细
@@ -415,6 +443,15 @@ export class Hedge15mEngine {
   private leg1OrderId = "";          // Leg1 订单ID
   private leg1FilledAt = 0;
   private leg1Estimated = false;       // Leg1 成交是否为估算值
+  private leg2Dir = "";
+  private leg2Token = "";
+  private leg2Shares = 0;
+  private leg2FillPrice = 0;
+  private leg2OrderId = "";
+  private leg2FilledAt = 0;
+  private hedgeStopLockedPnl = 0;
+  private hedgeStopInFlight = false;
+  private hedgeStopAttempted = false;
   private leg1EntryInFlight = false;
   private leg1AttemptedThisRound = false;
   private roundMomentumRejects = 0;
@@ -839,9 +876,45 @@ export class Hedge15mEngine {
       })
       .sort((left, right) => {
         if (left.bs.allowed !== right.bs.allowed) return left.bs.allowed ? -1 : 1;
-        return right.bs.effectiveEdge - left.bs.effectiveEdge;
+        const leftWinScore = left.bs.fairRaw * 2 + left.bs.effectiveEdge;
+        const rightWinScore = right.bs.fairRaw * 2 + right.bs.effectiveEdge;
+        return rightWinScore - leftWinScore;
       })
       .map(item => item.candidate);
+  }
+
+  private getMispricingWinGate(
+    askPrice: number,
+    directionalBias: "up" | "down" | "flat",
+    alignmentScore: number,
+    bsFairRaw: number,
+    bsEdgeNet: number,
+  ): { allowed: boolean; reason: string } {
+    const minFair = askPrice >= 0.25
+      ? MISPRICING_WIN_HIGH_PRICE_MIN_FAIR
+      : askPrice >= MISPRICING_FLAT_WEAK_MAX_ASK
+        ? MISPRICING_WIN_MID_PRICE_MIN_FAIR
+        : MISPRICING_WIN_LOW_PRICE_MIN_FAIR;
+
+    if (bsFairRaw < minFair) {
+      return { allowed: false, reason: `win-fair ${bsFairRaw.toFixed(3)} < ${minFair.toFixed(2)}` };
+    }
+
+    if (askPrice < MISPRICING_FLAT_WEAK_MAX_ASK && bsEdgeNet < MISPRICING_WIN_LOW_PRICE_MIN_EDGE) {
+      return { allowed: false, reason: `low-price-win-edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(MISPRICING_WIN_LOW_PRICE_MIN_EDGE * 100).toFixed(0)}%` };
+    }
+
+    if (directionalBias === "flat") {
+      const highConvictionCheap = askPrice <= MISPRICING_FAST_TRACK_LOW_ASK && bsEdgeNet >= MISPRICING_FLAT_WEAK_MIN_EDGE;
+      if (!highConvictionCheap && alignmentScore < MISPRICING_FLAT_MIN_ALIGNMENT_SCORE) {
+        return { allowed: false, reason: `flat-weak-signal score=${alignmentScore} < ${MISPRICING_FLAT_MIN_ALIGNMENT_SCORE}` };
+      }
+      if (askPrice > MISPRICING_FLAT_WEAK_MAX_ASK && bsEdgeNet < MISPRICING_FLAT_WEAK_MIN_EDGE) {
+        return { allowed: false, reason: `flat-edge ${(bsEdgeNet * 100).toFixed(1)}% < ${(MISPRICING_FLAT_WEAK_MIN_EDGE * 100).toFixed(0)}%` };
+      }
+    }
+
+    return { allowed: true, reason: "ok" };
   }
 
   private getNetEdgeTier(edge: number): { label: "small" | "normal" | "strong"; multiplier: number } {
@@ -905,7 +978,7 @@ export class Hedge15mEngine {
     if (this.status.startsWith("跳过:")) return this.status;
     if (this.status === "窗口到期,无砸盘") return this.status;
     if (this.hedgeState === "leg1_pending") return "Leg1 下单中";
-    if (this.hedgeState === "leg1_filled") return "已成交Leg1, 持有到结算";
+    if (this.hedgeState === "leg1_filled") return this.leg2Shares > 0 ? "已触发对冲止损, 等结算" : "已成交Leg1, 监控对冲止损";
     if (this.hedgeState === "watching") return this.secondsLeft >= this.rtMinEntrySecs ? "本轮仍在观察窗口" : "本轮入场窗已关闭";
     return this.status || "等待中";
   }
@@ -952,6 +1025,11 @@ export class Hedge15mEngine {
       hedgeLeg1Dir: this.leg1Dir,
       hedgeLeg1Price: this.leg1Price,
       hedgeTotalCost: this.totalCost,
+      hedgeStopEnabled: HEDGE_STOP_ENABLED,
+      hedgeStopLeg2Dir: this.leg2Dir,
+      hedgeStopLeg2Price: this.leg2FillPrice,
+      hedgeStopLeg2Shares: this.leg2Shares,
+      hedgeStopLockedPnl: this.hedgeStopLockedPnl,
       dumpDetected: this.dumpDetected,
       maxEntryAsk: this.getMaxEntryAsk(),
       activeStrategyMode: this.activeStrategyMode,
@@ -1118,6 +1196,13 @@ export class Hedge15mEngine {
           leg1Shares: this.leg1Shares,
           leg1FillPrice: this.leg1FillPrice,
           leg1OrderId: this.leg1OrderId,
+          leg2Dir: this.leg2Dir,
+          leg2Token: this.leg2Token,
+          leg2Shares: this.leg2Shares,
+          leg2FillPrice: this.leg2FillPrice,
+          leg2OrderId: this.leg2OrderId,
+          leg2FilledAt: this.leg2FilledAt,
+          hedgeStopLockedPnl: this.hedgeStopLockedPnl,
           totalCost: this.totalCost,
           roundStartBtcPrice: this.roundStartBtcPrice,
           entrySource: this.leg1EntrySource,
@@ -1254,6 +1339,14 @@ export class Hedge15mEngine {
         this.leg1FillPrice = pos.leg1FillPrice;
         this.leg1Price = pos.leg1FillPrice;
         this.leg1OrderId = pos.leg1OrderId;
+        this.leg2Dir = pos.leg2Dir || "";
+        this.leg2Token = pos.leg2Token || "";
+        this.leg2Shares = pos.leg2Shares || 0;
+        this.leg2FillPrice = pos.leg2FillPrice || 0;
+        this.leg2OrderId = pos.leg2OrderId || "";
+        this.leg2FilledAt = pos.leg2FilledAt || 0;
+        this.hedgeStopLockedPnl = pos.hedgeStopLockedPnl || 0;
+        this.hedgeStopAttempted = this.leg2Shares > 0;
         this.totalCost = pos.totalCost;
         this.roundStartBtcPrice = pos.roundStartBtcPrice;
         this.leg1EntrySource = pos.entrySource;
@@ -1335,6 +1428,15 @@ export class Hedge15mEngine {
     this.leg1OrderId = "";
     this.leg1FilledAt = 0;
     this.leg1Estimated = false;
+    this.leg2Dir = "";
+    this.leg2Token = "";
+    this.leg2Shares = 0;
+    this.leg2FillPrice = 0;
+    this.leg2OrderId = "";
+    this.leg2FilledAt = 0;
+    this.hedgeStopLockedPnl = 0;
+    this.hedgeStopInFlight = false;
+    this.hedgeStopAttempted = false;
     this.currentDumpDrop = 0;
     this.currentDumpVelocity = "normal";
     this.leg1MakerFill = false;
@@ -1628,10 +1730,12 @@ export class Hedge15mEngine {
                     // 信号强一致(≥4源aligned)时跳过确认等待 — dump更可信
                     this.computeSignalAlignment(candidate.dir);
                     const candidateDrop = candidate.dir === "up" ? dumpBaseline.upDrop : dumpBaseline.downDrop;
-                    const strongMispricingCandidate = candidateDrop >= MISPRICING_STRONG_DROP || candidate.askPrice <= MISPRICING_LOW_PRICE;
                     const candidateBs = this.evaluateBsEntry(candidate.dir, candidate.askPrice, secs, "mispricing", true);
+                    const candidateAlignmentScore = this.dirAlignedCount - this.dirContraCount;
+                    const strongMispricingCandidate = candidateDrop >= MISPRICING_STRONG_DROP
+                      || (candidate.askPrice <= MISPRICING_FAST_TRACK_LOW_ASK && candidateBs.effectiveEdge >= MISPRICING_WIN_LOW_PRICE_MIN_EDGE);
                     const edgeFastTrack = candidateBs.effectiveEdge >= MISPRICING_FAST_LANE_EDGE;
-                    const signalFastTrack = strongMispricingCandidate || edgeFastTrack || (this.dirAlignedCount >= 3 && this.dirContraCount <= 2);
+                    const signalFastTrack = strongMispricingCandidate || edgeFastTrack || (candidateAlignmentScore >= 3 && this.dirContraCount <= 2);
                     if (!signalFastTrack && this.dumpConfirmCount < this.rtDumpConfirmCycles) {
                       // 还未达到确认次数且信号不够强, 继续等
                     } else {
@@ -1707,13 +1811,15 @@ export class Hedge15mEngine {
         }
 
         if (this.hedgeState === "leg1_filled") {
-          // ── 方向性策略: 纯持有到结算, 零中途干预 ──
-          // 入场价≤$0.35, 即使50%随机胜率也EV+$0.15/share
-          // 卖出要付2% taker fee, 持有到结算 0 fee — 任何中途卖出都是EV-
+          await this.maybeHedgeStopLoss(trader, rnd, secs);
           const entryPrice = this.leg1FillPrice > 0 ? this.leg1FillPrice : this.leg1Price;
           const secsHeld = this.leg1FilledAt > 0 ? (Date.now() - this.leg1FilledAt) / 1000 : 0;
           const sourceTag = this.leg1EntrySource === "dual-side-preorder" ? "预挂" : "砸盘";
-          this.status = `纯持仓[${sourceTag}]: ${this.leg1Dir.toUpperCase()}@$${entryPrice.toFixed(2)} ${this.leg1Shares}份 EV+$${(this.leg1Shares * (1 - entryPrice)).toFixed(2)} ${secs.toFixed(0)}s → 等结算`;
+          if (this.leg2Shares > 0) {
+            this.status = `对冲止损[${sourceTag}]: ${this.leg1Dir.toUpperCase()} ${this.leg1Shares.toFixed(0)}份 + ${this.leg2Dir.toUpperCase()} ${this.leg2Shares.toFixed(0)}份 锁定${this.hedgeStopLockedPnl >= 0 ? "+" : ""}$${this.hedgeStopLockedPnl.toFixed(2)} ${secs.toFixed(0)}s`;
+          } else {
+            this.status = `持仓[${sourceTag}]: ${this.leg1Dir.toUpperCase()}@$${entryPrice.toFixed(2)} ${this.leg1Shares}份 ${secsHeld.toFixed(0)}s, 监控对冲止损 ${secs.toFixed(0)}s`;
+          }
         }
 
         // 回合最后30秒: 预加载下一轮市场
@@ -2015,6 +2121,16 @@ export class Hedge15mEngine {
     const alignmentScore = this.dirAlignedCount - this.dirContraCount;
     if (strategyMode === "mispricing") {
       const strongContra = alignmentScore <= MISPRICING_STRONG_CONTRA_SCORE;
+      const winGate = this.getMispricingWinGate(askPrice, directionalBias, alignmentScore, bsFairRaw, bsEdgeNet);
+      if (!winGate.allowed) {
+        this.trackRoundRejectReason(`win-gate: ${winGate.reason}`);
+        const skipKey = `win-gate:${dir}:${directionalBias}:${askPrice.toFixed(2)}:${winGate.reason}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M MISPRICING SKIP: ${winGate.reason} fair=${bsFairRaw.toFixed(3)} edge=${(bsEdgeNet * 100).toFixed(1)}% score=${alignmentScore} bias=${directionalBias}`);
+        }
+        return;
+      }
       if (strongContra && bsEdgeNet < MISPRICING_CONTRA_EDGE_OVERRIDE) {
         this.trackRoundRejectReason(`strong-contra: score=${alignmentScore} edge=${(bsEdgeNet * 100).toFixed(1)}%`);
         const skipKey = `contra:${dir}:${alignmentScore}:${Math.floor(bsEdgeNet * 1000)}`;
@@ -2066,6 +2182,9 @@ export class Hedge15mEngine {
     if (strategyMode === "mispricing") {
       if (bsEdgeNet >= MISPRICING_FAST_LANE_EDGE) budgetPct *= 1.15;
       else if (bsEdgeNet >= MISPRICING_NORMAL_EDGE) budgetPct *= 1.05;
+      if (directionalBias === "flat") {
+        budgetPct *= 0.75;
+      }
       if (alignmentScore <= MISPRICING_STRONG_CONTRA_SCORE && bsEdgeNet < MISPRICING_FAST_LANE_EDGE) {
         budgetPct *= 0.75;
       }
@@ -2893,6 +3012,139 @@ export class Hedge15mEngine {
     }
   }
 
+  private getOppositeLeg(dir: string, rnd: Round15m): { dir: string; token: string } | null {
+    if (dir === "up") return { dir: "down", token: rnd.downToken };
+    if (dir === "down") return { dir: "up", token: rnd.upToken };
+    return null;
+  }
+
+  private isBtcAdverseToLeg1(): boolean {
+    const btcNow = getBtcPrice();
+    if (this.roundStartBtcPrice <= 0 || btcNow <= 0) return false;
+    const movePct = (btcNow - this.roundStartBtcPrice) / this.roundStartBtcPrice;
+    if (this.leg1Dir === "up") return movePct <= -HEDGE_STOP_ADVERSE_BTC_PCT;
+    if (this.leg1Dir === "down") return movePct >= HEDGE_STOP_ADVERSE_BTC_PCT;
+    return false;
+  }
+
+  private async maybeHedgeStopLoss(trader: Trader, rnd: Round15m, secsLeft: number): Promise<void> {
+    if (!HEDGE_STOP_ENABLED) return;
+    if (this.hedgeStopInFlight || this.hedgeStopAttempted || this.leg2Shares > 0) return;
+    if (this.hedgeState !== "leg1_filled" || this.leg1Shares < MIN_SHARES || this.totalCost <= 0) return;
+    if (secsLeft < HEDGE_STOP_MIN_SECS_LEFT) return;
+
+    const opposite = this.getOppositeLeg(this.leg1Dir, rnd);
+    if (!opposite || !this.leg1Token) return;
+
+    const [leg1Book, oppBook] = await Promise.all([
+      getHotBestPrices(trader, this.leg1Token).catch(() => null),
+      getHotBestPrices(trader, opposite.token).catch(() => null),
+    ]);
+
+    const leg1Bid = leg1Book?.bid ?? 0;
+    const oppAsk = oppBook?.ask ?? 0;
+    const bookStop = leg1Bid > 0 && leg1Bid <= HEDGE_STOP_LEG1_BID_TRIGGER;
+    const btcStop = this.isBtcAdverseToLeg1();
+    if (!bookStop && !btcStop) return;
+    if (oppAsk <= 0 || oppAsk > HEDGE_STOP_MAX_OPP_ASK) {
+      this.writeRoundAudit("hedge-stop-skip", {
+        reason: "opp-ask-out-of-range",
+        leg1Dir: this.leg1Dir,
+        leg1Bid,
+        oppDir: opposite.dir,
+        oppAsk,
+        maxOppAsk: HEDGE_STOP_MAX_OPP_ASK,
+        bookStop,
+        btcStop,
+      });
+      return;
+    }
+
+    const targetShares = Math.floor(this.leg1Shares);
+    if (targetShares < MIN_SHARES) return;
+
+    const estimatedHedgeCost = targetShares * oppAsk * (1 + HEDGE_STOP_TAKER_FEE);
+    const projectedLockedPnl = Math.min(this.leg1Shares, targetShares) - (this.totalCost + estimatedHedgeCost);
+    const lockedLossPct = projectedLockedPnl < 0 ? Math.abs(projectedLockedPnl) / this.totalCost : 0;
+    const riskReduction = projectedLockedPnl - (-this.totalCost);
+    if (lockedLossPct > HEDGE_STOP_MAX_LOCKED_LOSS_PCT || riskReduction < HEDGE_STOP_MIN_LOCK_SAVINGS) {
+      this.writeRoundAudit("hedge-stop-skip", {
+        reason: "locked-loss-too-high",
+        leg1Dir: this.leg1Dir,
+        leg1Bid,
+        oppDir: opposite.dir,
+        oppAsk,
+        projectedLockedPnl,
+        lockedLossPct,
+        riskReduction,
+      });
+      return;
+    }
+
+    this.hedgeStopInFlight = true;
+    this.hedgeStopAttempted = true;
+    this.status = `对冲止损下单: ${opposite.dir.toUpperCase()} @${oppAsk.toFixed(2)} x${targetShares}`;
+    this.writeRoundAudit("hedge-stop-trigger", {
+      leg1Dir: this.leg1Dir,
+      leg1Bid,
+      oppDir: opposite.dir,
+      oppAsk,
+      targetShares,
+      projectedLockedPnl,
+      lockedLossPct,
+      riskReduction,
+      bookStop,
+      btcStop,
+    });
+
+    try {
+      const orderSubmitStartedAt = Date.now();
+      const res = await trader.placeFakBuy(opposite.token, targetShares * oppAsk, this.negRisk);
+      const orderId: string = res?.orderID || res?.order_id || "";
+      if (!orderId) {
+        logger.warn(`HEDGE STOP failed: no order id for ${opposite.dir.toUpperCase()} hedge`);
+        return;
+      }
+
+      const details = await trader.waitForOrderFillDetails(orderId, getDynamicParams().fillCheckMs);
+      recordExecutionLatency("submitToAck", Date.now() - orderSubmitStartedAt);
+      const filledShares = details.filled || 0;
+      const fillPrice = details.avgPrice || oppAsk;
+      if (!Number.isFinite(filledShares) || filledShares < MIN_SHARES || !Number.isFinite(fillPrice) || fillPrice <= 0) {
+        logger.warn(`HEDGE STOP failed: invalid fill shares=${filledShares} price=${fillPrice}`);
+        return;
+      }
+
+      const hedgeCost = filledShares * fillPrice * (1 + HEDGE_STOP_TAKER_FEE);
+      this.leg2Dir = opposite.dir;
+      this.leg2Token = opposite.token;
+      this.leg2Shares = filledShares;
+      this.leg2FillPrice = fillPrice;
+      this.leg2OrderId = orderId.slice(0, 12);
+      this.leg2FilledAt = Date.now();
+      this.totalCost += hedgeCost;
+      this.balance -= hedgeCost;
+      this.hedgeStopLockedPnl = Math.min(this.leg1Shares, this.leg2Shares) - this.totalCost;
+      this.savePaperRuntimeSnapshot();
+
+      logger.warn(`HEDGE STOP FILLED: ${opposite.dir.toUpperCase()} ${filledShares.toFixed(0)}份 @${fillPrice.toFixed(2)} cost=$${hedgeCost.toFixed(2)} locked=${this.hedgeStopLockedPnl >= 0 ? "+" : ""}$${this.hedgeStopLockedPnl.toFixed(2)}`);
+      this.writeRoundAudit("hedge-stop-filled", {
+        leg1Dir: this.leg1Dir,
+        leg1Shares: this.leg1Shares,
+        leg1Cost: this.totalCost - hedgeCost,
+        leg2Dir: this.leg2Dir,
+        leg2Shares: this.leg2Shares,
+        leg2FillPrice: this.leg2FillPrice,
+        hedgeCost,
+        totalCost: this.totalCost,
+        lockedPnl: this.hedgeStopLockedPnl,
+        orderId: this.leg2OrderId,
+      });
+    } finally {
+      this.hedgeStopInFlight = false;
+    }
+  }
+
   private async settleHedge(): Promise<void> {
     const preSettleBalance = this.balance; // 记录结算前余额用于校验
     await sleep(2000); // 等待价格源更新
@@ -2938,6 +3190,9 @@ export class Hedge15mEngine {
     if (this.leg1Dir === actualDir && this.leg1Shares > 0) {
       returnVal = this.leg1Shares;
     }
+    if (this.leg2Dir === actualDir && this.leg2Shares > 0) {
+      returnVal += this.leg2Shares;
+    }
 
     const profit = returnVal - this.totalCost;
 
@@ -2947,6 +3202,10 @@ export class Hedge15mEngine {
       this.writeRoundAudit("settle-nan-guard", { profit, totalCost: this.totalCost, returnVal, leg1Shares: this.leg1Shares });
       this.totalCost = 0;
       this.leg1Shares = 0;
+      this.leg2Shares = 0;
+      this.leg2Dir = "";
+      this.leg2Token = "";
+      this.hedgeStopLockedPnl = 0;
       this.hedgeState = "done";
       await this.refreshBalance();
       return;
@@ -2962,7 +3221,9 @@ export class Hedge15mEngine {
     this.balance += returnVal;
     this.trader?.creditSettlement(returnVal);
 
-    const settlementReason = `结算: BTC ${actualDir.toUpperCase()}(${dirSource}), ${this.leg1Dir===actualDir?'方向正确→$1/份':'方向错误→$0'}`;
+    const settlementReason = this.leg2Shares > 0
+      ? `结算: BTC ${actualDir.toUpperCase()}(${dirSource}), 对冲止损 ${this.leg1Dir.toUpperCase()} ${this.leg1Dir===actualDir?'兑付':'归零'} / ${this.leg2Dir.toUpperCase()} ${this.leg2Dir===actualDir?'兑付':'归零'}`
+      : `结算: BTC ${actualDir.toUpperCase()}(${dirSource}), ${this.leg1Dir===actualDir?'方向正确→$1/份':'方向错误→$0'}`;
 
     this.history.push({
       time: timeStr(),
@@ -2974,9 +3235,16 @@ export class Hedge15mEngine {
       cumProfit: this.totalProfit,
       exitType: "settlement",
       exitReason: settlementReason,
-      profitBreakdown: `结算回收$${returnVal.toFixed(2)}(${this.leg1Shares.toFixed(0)}份) - 成本$${this.totalCost.toFixed(2)} = ${profit>=0?'+':''}$${profit.toFixed(2)}`,
+      profitBreakdown: this.leg2Shares > 0
+        ? `结算回收$${returnVal.toFixed(2)}(L1 ${this.leg1Shares.toFixed(0)}份/L2 ${this.leg2Shares.toFixed(0)}份) - 成本$${this.totalCost.toFixed(2)} = ${profit>=0?'+':''}$${profit.toFixed(2)}`
+        : `结算回收$${returnVal.toFixed(2)}(${this.leg1Shares.toFixed(0)}份) - 成本$${this.totalCost.toFixed(2)} = ${profit>=0?'+':''}$${profit.toFixed(2)}`,
       leg1Shares: this.leg1Shares,
       leg1FillPrice: this.leg1FillPrice,
+      leg2Dir: this.leg2Dir ? this.leg2Dir.toUpperCase() : undefined,
+      leg2Shares: this.leg2Shares || undefined,
+      leg2FillPrice: this.leg2FillPrice || undefined,
+      leg2OrderId: this.leg2OrderId || undefined,
+      hedgeLockedPnl: this.leg2Shares > 0 ? this.hedgeStopLockedPnl : undefined,
       orderId: this.leg1OrderId,
       estimated: this.leg1Estimated,
       entrySource: this.leg1EntrySource,
@@ -2992,7 +3260,7 @@ export class Hedge15mEngine {
     this.saveHistory();
 
     this.status = `结算: ${result} ${profit >= 0 ? "+" : ""}$${profit.toFixed(2)} (返$${returnVal.toFixed(2)} dir=${actualDir}/${dirSource})`;
-    logger.info(`HEDGE15M SETTLED: ${result} dir=${actualDir}(${dirSource}) return=$${returnVal.toFixed(2)} cost=$${this.totalCost.toFixed(2)} profit=$${profit.toFixed(2)} L1fill=${this.leg1FillPrice.toFixed(2)}`);
+    logger.info(`HEDGE15M SETTLED: ${result} dir=${actualDir}(${dirSource}) return=$${returnVal.toFixed(2)} cost=$${this.totalCost.toFixed(2)} profit=$${profit.toFixed(2)} L1fill=${this.leg1FillPrice.toFixed(2)}${this.leg2Shares > 0 ? ` L2=${this.leg2Dir}@${this.leg2FillPrice.toFixed(2)}x${this.leg2Shares.toFixed(0)}` : ""}`);
     this.writeRoundAudit("settlement", {
       result,
       actualDir,
@@ -3000,6 +3268,10 @@ export class Hedge15mEngine {
       returnVal,
       profit,
       settlementReason,
+      leg2Dir: this.leg2Dir,
+      leg2Shares: this.leg2Shares,
+      leg2FillPrice: this.leg2FillPrice,
+      hedgeLockedPnl: this.hedgeStopLockedPnl,
     });
 
     // ── 结算 P/L 校验: 链上余额 vs 本地预期 ──
@@ -3019,6 +3291,13 @@ export class Hedge15mEngine {
 
     this.totalCost = 0;
     this.leg1Shares = 0;
+    this.leg2Shares = 0;
+    this.leg2Dir = "";
+    this.leg2Token = "";
+    this.leg2FillPrice = 0;
+    this.leg2OrderId = "";
+    this.leg2FilledAt = 0;
+    this.hedgeStopLockedPnl = 0;
     this.hedgeState = "done";
   }
 }

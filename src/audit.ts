@@ -67,7 +67,6 @@ export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTOR
   for (const trade of history) {
     const profit = safeNumber(trade.profit);
     const cost = safeNumber(trade.totalCost);
-    const leg1Shares = safeNumber(trade.leg1Shares);
     const exitType = trade.exitType || "unknown";
 
     exitTypeBreakdown[exitType] = (exitTypeBreakdown[exitType] || 0) + 1;
@@ -79,8 +78,8 @@ export function buildAuditReport(history: HedgeHistoryEntry[], filePath = HISTOR
     if (profit > largestWin) largestWin = profit;
     if (profit < largestLoss) largestLoss = profit;
 
-    if (exitType === "settlement" && trade.result === "WIN") {
-      totalReturn += leg1Shares;
+    if (exitType === "settlement") {
+      totalReturn += Math.max(0, cost + profit);
     }
 
     runningProfit += profit;

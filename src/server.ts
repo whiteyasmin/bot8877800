@@ -215,8 +215,9 @@ app.get("/api/download-all", auth, (_req, res) => {
   const hSep    = "|---|------|------|------|--------|------|------|------|------|------|------|--------|----------|";
   const hRows = historyRows.map((h: any, i: number) => {
     const price = h.leg1FillPrice > 0 ? h.leg1FillPrice : h.leg1Price || 0;
+    const leg2 = h.leg2Shares > 0 ? ` / 对冲${h.leg2Dir || ""}@${Number(h.leg2FillPrice || 0).toFixed(2)}x${Number(h.leg2Shares || 0).toFixed(0)}` : "";
     const pf = h.profit >= 0 ? `+$${h.profit.toFixed(2)}` : `-$${Math.abs(h.profit).toFixed(2)}`;
-    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${formatEntrySource(h.entrySource)} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
+    return `| ${i + 1} | ${h.time || ""} | ${h.result || ""} | ${h.leg1Dir || ""} | $${price.toFixed(2)} | ${(h.leg1Shares || 0).toFixed(0)}${leg2} | $${(h.totalCost || 0).toFixed(2)} | ${pf} | $${(h.cumProfit || 0).toFixed(2)} | ${formatEntrySource(h.entrySource)} | ${h.entryTrendBias || "-"} | ${h.entrySecondsLeft ?? "-"} | ${(h.exitReason || "-").replace(/\|/g, "/")} |`;
   });
 
   // ── Decision audit table ──

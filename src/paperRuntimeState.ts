@@ -16,6 +16,13 @@ export interface PaperRuntimeState {
     leg1Shares: number;
     leg1FillPrice: number;
     leg1OrderId: string;
+    leg2Dir?: string;
+    leg2Token?: string;
+    leg2Shares?: number;
+    leg2FillPrice?: number;
+    leg2OrderId?: string;
+    leg2FilledAt?: number;
+    hedgeStopLockedPnl?: number;
     totalCost: number;
     roundStartBtcPrice: number;
     entrySource: string;
@@ -50,6 +57,13 @@ export function loadPaperRuntimeState(): PaperRuntimeState | null {
         leg1Shares: Number(raw.openPosition.leg1Shares) || 0,
         leg1FillPrice: Number(raw.openPosition.leg1FillPrice) || 0,
         leg1OrderId: String(raw.openPosition.leg1OrderId || ""),
+        leg2Dir: String(raw.openPosition.leg2Dir || ""),
+        leg2Token: String(raw.openPosition.leg2Token || ""),
+        leg2Shares: Number(raw.openPosition.leg2Shares) || 0,
+        leg2FillPrice: Number(raw.openPosition.leg2FillPrice) || 0,
+        leg2OrderId: String(raw.openPosition.leg2OrderId || ""),
+        leg2FilledAt: Number(raw.openPosition.leg2FilledAt) || 0,
+        hedgeStopLockedPnl: Number(raw.openPosition.hedgeStopLockedPnl) || 0,
         totalCost: Number(raw.openPosition.totalCost) || 0,
         roundStartBtcPrice: Number(raw.openPosition.roundStartBtcPrice) || 0,
         entrySource: String(raw.openPosition.entrySource || ""),
