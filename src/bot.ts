@@ -83,7 +83,7 @@ const ENTRY_WINDOW_S  = 660;      // 开局11分钟内监控砸盘, 窗口关闭
 const ROUND_DURATION  = 900;      // 15分钟
 const TAKER_FEE       = 0.02;     // Polymarket taker fee ~2%
 const MIN_ENTRY_SECS  = 120;      // 剩余 <4分钟不开新仓 (放宽: 低价入场EV+即使时间短, 4min足够结算)
-const MAX_ENTRY_ASK   = 0.35;     // Leg1 入场价上限 (实盘: ≤$0.35时EV≥$0.15/份@50%胜率)
+const MAX_ENTRY_ASK   = 0.45;     // Leg1 默认入场价上限 (激进版放宽到0.45, 再按策略细分)
 const MIN_ENTRY_ASK   = 0.10;     // Leg1 入场价下限, 深度砸盘时低价=高EV (dumpThreshold已过滤噪声)
 const DIRECTIONAL_MOVE_PCT = 0.0012;       // 回合内价格移动超过 0.12% 才形成方向偏置
 const MOMENTUM_WINDOW_SEC = 60;            // 短期动量窗口 60秒
@@ -96,12 +96,12 @@ const BTC_PRESSURE_VOL_WINDOW_SEC = 300;
 const BTC_PRESSURE_STRONG_MOVE = 0.0008;
 const BTC_PRESSURE_STRONG_VELOCITY = 0.45;
 const BTC_PRESSURE_EXTREME_VELOCITY = 0.80;
-const STOP_LOSS_HEDGE_MIN_HOLD_SECS = 45;
-const STOP_LOSS_HEDGE_MIN_REMAINING_SECS = 90;
+const STOP_LOSS_HEDGE_MIN_HOLD_SECS = 35;
+const STOP_LOSS_HEDGE_MIN_REMAINING_SECS = 75;
 const STOP_LOSS_HEDGE_MAX_ASK = 0.72;
 const STOP_LOSS_HEDGE_STRONG_MAX_ASK = 0.82;
 const STOP_LOSS_HEDGE_RATIO = 0.50;
-const STOP_LOSS_HEDGE_STRONG_RATIO = 0.75;
+const STOP_LOSS_HEDGE_STRONG_RATIO = 0.80;
 
 const BASE_BUDGET_PCT = 0.18;             // 默认轻仓基准 (Kelly分层会自动覆盖)
 const KELLY_WIN_RATE = 0.54;              // Kelly估计胜率 (实盘4W/3L≈57%, 54%保守估计)
@@ -954,8 +954,26 @@ export class Hedge15mEngine {
   }
 
   /** 方向信号不提升入场上限: 低价才是真正的edge */
-  private getDynamicMaxEntryAsk(_entryDir?: string): number {
-    return this.getMaxEntryAsk();
+  private getDynamicMaxEntryAsk(entryDir?: string, strategyMode: "mispricing" | "trend" | "counter-win" = "mispricing"): number {
+    const pressure = this.getBtcPressureSignal();
+    if (strategyMode === "counter-win") {
+      return COUNTER_WIN_MAX_ASK;
+    }
+    if (strategyMode === "trend") {
+      if (pressure.direction !== "flat" && pressure.direction === entryDir) return DIRECTIONAL_TREND_MAX_ASK;
+      if (pressure.strong && pressure.direction !== "flat") return DIRECTIONAL_TREND_PULLBACK_MAX_ASK;
+      return Math.min(0.62, this.getMaxEntryAsk());
+    }
+
+    let maxAsk = this.getMaxEntryAsk();
+    if (pressure.strong && pressure.direction !== "flat") {
+      if (pressure.direction === entryDir) {
+        maxAsk = Math.max(maxAsk, 0.50);
+      } else if (pressure.reversal) {
+        maxAsk = Math.min(maxAsk, 0.42);
+      }
+    }
+    return maxAsk;
   }
 
   private getRoundPhase(): string {
@@ -1953,7 +1971,7 @@ export class Hedge15mEngine {
     }
 
     // ── Leg1价格上限: 只接受足够低价的EV+入场, 强信号时动态提升 ──
-    const maxEntryAsk = strategyMode === "counter-win" ? COUNTER_WIN_MAX_ASK : this.getDynamicMaxEntryAsk(dir);
+    const maxEntryAsk = this.getDynamicMaxEntryAsk(dir, strategyMode);
     const directionalBias = this.getRoundDirectionalBias();
 
     const plan = planHedgeEntry({
@@ -3016,14 +3034,18 @@ export class Hedge15mEngine {
 
     const hedgeMaxAsk = pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY
       ? STOP_LOSS_HEDGE_STRONG_MAX_ASK
-      : STOP_LOSS_HEDGE_MAX_ASK;
+      : pressure.strong
+        ? 0.78
+        : STOP_LOSS_HEDGE_MAX_ASK;
     const hedgeRatio = pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY
       ? STOP_LOSS_HEDGE_STRONG_RATIO
-      : STOP_LOSS_HEDGE_RATIO;
+      : pressure.reversal || pressure.strong
+        ? 0.65
+        : STOP_LOSS_HEDGE_RATIO;
     const hedgeSharesTarget = Math.max(1, Math.floor(this.leg1Shares * hedgeRatio));
     const hedgeAmount = hedgeSharesTarget * hedgeBook.ask;
     const hedgeEdge = this.evaluateBsEntry(hedgeDir, hedgeBook.ask, this.secondsLeft, "counter-win", true).effectiveEdge;
-    const hedgeEdgeFloor = pressure.reversal ? -0.01 : 0.0;
+    const hedgeEdgeFloor = pressure.reversal ? -0.015 : 0.0;
 
     if (hedgeBook.ask > hedgeMaxAsk || hedgeEdge < hedgeEdgeFloor) {
       const skipKey = `${hedgeDir}:${hedgeBook.ask.toFixed(2)}:${Math.floor(pressure.velocity * 100)}:${Math.floor(pressure.score * 100000)}`;
