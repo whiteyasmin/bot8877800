@@ -96,8 +96,8 @@ const BTC_PRESSURE_VOL_WINDOW_SEC = 300;
 const BTC_PRESSURE_STRONG_MOVE = 0.0008;
 const BTC_PRESSURE_STRONG_VELOCITY = 0.45;
 const BTC_PRESSURE_EXTREME_VELOCITY = 0.80;
-const STOP_LOSS_HEDGE_MIN_HOLD_SECS = 35;
-const STOP_LOSS_HEDGE_MIN_REMAINING_SECS = 75;
+const STOP_LOSS_HEDGE_MIN_HOLD_SECS = 60;
+const STOP_LOSS_HEDGE_MIN_REMAINING_SECS = 120;
 const STOP_LOSS_HEDGE_MAX_ASK = 0.72;
 const STOP_LOSS_HEDGE_STRONG_MAX_ASK = 0.82;
 const STOP_LOSS_HEDGE_RATIO = 0.50;
@@ -202,6 +202,7 @@ export interface Hedge15mState {
   btcPressureVelocity: number;
   btcPressureReversal: boolean;
   btcPressureStrong: boolean;
+  lastRejectReason: string;
   leg1Maker: boolean;
   leg1WinRate: number;
   leg1BsFair: number;
@@ -486,6 +487,7 @@ export class Hedge15mEngine {
   private leg1EntryTrendBias: "up" | "down" | "flat" = "flat";
   private leg1EntrySecondsLeft = 0;
   private roundRejectReasonCounts = new Map<string, number>();
+  private lastRejectReason = "";
   private rollingPnL: Array<{ ts: number; profit: number }> = []; // 滚动P/L记录
   private dumpConfirmCount = 0;             // 连续砸盘确认计数
   private lastDumpCandidateDir = "";        // 上个cycle的dump方向
@@ -526,6 +528,7 @@ export class Hedge15mEngine {
   private trackRoundRejectReason(reason: string): void {
     const normalized = reason.trim();
     if (!normalized) return;
+    this.lastRejectReason = normalized;
     this.roundRejectReasonCounts.set(normalized, (this.roundRejectReasonCounts.get(normalized) || 0) + 1);
   }
 
@@ -1069,6 +1072,7 @@ export class Hedge15mEngine {
       btcPressureVelocity: btcPressure.velocity,
       btcPressureReversal: btcPressure.reversal,
       btcPressureStrong: btcPressure.strong,
+      lastRejectReason: this.lastRejectReason || this.lastBsmRejectReason || "",
       leg1Maker: this.leg1MakerFill,
       leg1WinRate: this.leg1WinRate,
       leg1BsFair: this.leg1BsFair,
@@ -1461,6 +1465,7 @@ export class Hedge15mEngine {
     this.lastSignalSkipKey = "";
     this.lastRepricingRejectKey = "";
     this.bsmRejectThrottle.clear();
+    this.lastRejectReason = "";
     this.lastBsmRejectReason = "";
     this.lastDumpLogKey = "";
     this.lastDumpInfoKey = "";
@@ -2000,6 +2005,7 @@ export class Hedge15mEngine {
     // ── 低波过滤: reactive在微行情中噪声极高, 直接跳过 ──
     const reactiveVol = getRecentVolatility(300);
     const strongMispricing = strategyMode === "mispricing" && (this.currentDumpDrop >= MISPRICING_STRONG_DROP || askPrice <= MISPRICING_LOW_PRICE);
+    const pressure = this.getBtcPressureSignal();
     if (strategyMode !== "counter-win" && !strongMispricing && reactiveVol < REACTIVE_MIN_VOL) {
       this.trackRoundRejectReason(`reactive-low-vol: ${(reactiveVol * 100).toFixed(3)}% < ${(REACTIVE_MIN_VOL * 100).toFixed(2)}%`);
       const skipKey = `reactive-vol:${dir}:${Math.floor(reactiveVol * 100000)}`;
@@ -2025,7 +2031,6 @@ export class Hedge15mEngine {
     const bsFairRaw = bsEntry.fairRaw;
     const bsWinRate = bsEntry.fairKelly;
     const bsEdgeNet = bsEntry.effectiveEdge;
-    const pressure = this.getBtcPressureSignal();
     logger.info(
       `HEDGE15M PRESSURE ENTRY: ${dir.toUpperCase()} @${askPrice.toFixed(2)} mode=${strategyMode} ` +
       `${this.formatBtcPressure(pressure)} edge=${(bsEdgeNet * 100).toFixed(1)}% fair=${bsFairRaw.toFixed(3)}`,
@@ -2060,6 +2065,16 @@ export class Hedge15mEngine {
       }
     }
     if (strategyMode === "mispricing") {
+      const flatPressureHighAsk = pressure.direction === "flat" && askPrice >= 0.30 && rnd.secondsLeft > 420;
+      if (flatPressureHighAsk && this.currentDumpDrop < MISPRICING_STRONG_DROP + 0.02) {
+        this.trackRoundRejectReason(`flat-pressure: ask=${askPrice.toFixed(2)} drop=${(this.currentDumpDrop * 100).toFixed(1)}%`);
+        const skipKey = `flat-pressure:${dir}:${askPrice.toFixed(2)}:${Math.floor(rnd.secondsLeft)}:${Math.floor(this.currentDumpDrop * 1000)}`;
+        if (skipKey !== this.lastSignalSkipKey) {
+          this.lastSignalSkipKey = skipKey;
+          logger.info(`HEDGE15M MISPRICING SKIP: flat pressure ask=${askPrice.toFixed(2)} drop ${(this.currentDumpDrop * 100).toFixed(1)}% held=${Math.floor(rnd.secondsLeft)}s`);
+        }
+        return;
+      }
       const btcDir = getBtcDirection();
       const btcMovePct = getBtcMovePct();
       const counterBtc = btcMovePct >= MISPRICING_COUNTER_BTC_MOVE && btcDir !== dir;
@@ -2106,8 +2121,10 @@ export class Hedge15mEngine {
       if (directionalBias === dir) minEdgeForRegime = 0.03;
       else if (directionalBias === "flat") minEdgeForRegime = 0.04;
       else minEdgeForRegime = 0.06;
-      if (strongMispricing) {
+      if (strongMispricing && pressure.direction !== "flat") {
         minEdgeForRegime = Math.max(MISPRICING_MIN_EDGE, minEdgeForRegime - 0.02);
+      } else if (pressure.direction === "flat" && askPrice >= 0.30) {
+        minEdgeForRegime += 0.02;
       }
     } else if (directionalBias === dir) {
       minEdgeForRegime = Math.max(0.04, minEdgeForRegime - 0.01);
@@ -3023,9 +3040,9 @@ export class Hedge15mEngine {
 
     const pressure = this.getBtcPressureSignal();
     const adverse = pressure.direction !== "flat" && pressure.direction !== this.leg1Dir;
-    const flipRisk = pressure.reversal && adverse;
-    if (!adverse && !flipRisk) return false;
-    if (!pressure.strong && pressure.velocity < BTC_PRESSURE_STRONG_VELOCITY) return false;
+    const clearReversal = adverse && pressure.reversal;
+    const extremeAdverse = adverse && pressure.strong && pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY;
+    if (!clearReversal && !extremeAdverse) return false;
 
     const hedgeDir: "up" | "down" = this.leg1Dir === "up" ? "down" : "up";
     const hedgeToken = hedgeDir === "up" ? rnd.upToken : rnd.downToken;
@@ -3034,18 +3051,14 @@ export class Hedge15mEngine {
 
     const hedgeMaxAsk = pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY
       ? STOP_LOSS_HEDGE_STRONG_MAX_ASK
-      : pressure.strong
-        ? 0.78
-        : STOP_LOSS_HEDGE_MAX_ASK;
+      : STOP_LOSS_HEDGE_MAX_ASK;
     const hedgeRatio = pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY
       ? STOP_LOSS_HEDGE_STRONG_RATIO
-      : pressure.reversal || pressure.strong
-        ? 0.65
-        : STOP_LOSS_HEDGE_RATIO;
+      : STOP_LOSS_HEDGE_RATIO;
     const hedgeSharesTarget = Math.max(1, Math.floor(this.leg1Shares * hedgeRatio));
     const hedgeAmount = hedgeSharesTarget * hedgeBook.ask;
     const hedgeEdge = this.evaluateBsEntry(hedgeDir, hedgeBook.ask, this.secondsLeft, "counter-win", true).effectiveEdge;
-    const hedgeEdgeFloor = pressure.reversal ? -0.015 : 0.0;
+    const hedgeEdgeFloor = pressure.velocity >= BTC_PRESSURE_EXTREME_VELOCITY ? 0.0 : 0.01;
 
     if (hedgeBook.ask > hedgeMaxAsk || hedgeEdge < hedgeEdgeFloor) {
       const skipKey = `${hedgeDir}:${hedgeBook.ask.toFixed(2)}:${Math.floor(pressure.velocity * 100)}:${Math.floor(pressure.score * 100000)}`;
@@ -3254,6 +3267,7 @@ export class Hedge15mEngine {
     this.stopLossHedgeShares = 0;
     this.stopLossHedgePrice = 0;
     this.stopLossHedgeTriggeredAt = 0;
+    this.lastRejectReason = "";
     this.hedgeState = "done";
   }
 }
