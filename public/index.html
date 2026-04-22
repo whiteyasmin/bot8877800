@@ -259,9 +259,6 @@ tr:hover{background:rgba(118,183,255,.03)}
           <div class="r"><span class="k">风险刹车</span><span class="v" id="h-signal-strength">--</span></div>
           <div class="r"><span class="k">盘口异常</span><span class="v" id="h-dump">--</span></div>
           <div class="r"><span class="k">最近BSM拒绝</span><span class="v" id="h-bsm-reject">--</span></div>
-          <div class="r"><span class="k">BTC压力</span><span class="v" id="h-btc-pressure">--</span></div>
-          <div class="r"><span class="k">最近拒绝</span><span class="v" id="h-last-reject">--</span></div>
-          <div class="r"><span class="k">止损对冲</span><span class="v" id="h-stop-hedge">--</span></div>
         </div>
         <div class="panel-note">
           <div class="title">当前入场解释</div>
@@ -739,40 +736,6 @@ function render(s) {
   const bsmRejectEl = document.getElementById('h-bsm-reject');
   bsmRejectEl.textContent = s.lastBsmRejectReason || '--';
   bsmRejectEl.style.color = s.lastBsmRejectReason ? '#f4c96b' : '#7a8ea6';
-  const pressureEl = document.getElementById('h-btc-pressure');
-  if (pressureEl) {
-    const pDir = s.btcPressureDirection || 'flat';
-    const pScore = Number(s.btcPressureScore || 0);
-    const pVel = Number(s.btcPressureVelocity || 0);
-    const pBits = [
-      pDir === 'up' ? '▲' : pDir === 'down' ? '▼' : '中',
-      (pScore >= 0 ? '+' : '') + (pScore * 100).toFixed(2) + '%',
-      'vel ' + pVel.toFixed(2),
-    ];
-    if (s.btcPressureReversal) pBits.push('反转');
-    if (s.btcPressureStrong) pBits.push('强');
-    pressureEl.textContent = pBits.join(' · ');
-    pressureEl.style.color = pDir === 'up' ? '#42d392' : pDir === 'down' ? '#ff6b6b' : '#8ea0b8';
-  }
-  const lastRejectEl = document.getElementById('h-last-reject');
-  if (lastRejectEl) {
-    const lastReject = s.lastRejectReason || s.lastBsmRejectReason || '--';
-    lastRejectEl.textContent = lastReject;
-    lastRejectEl.style.color = lastReject === '--' ? '#7a8ea6' : '#f4c96b';
-  }
-  const hedgeEl = document.getElementById('h-stop-hedge');
-  if (hedgeEl) {
-    if (s.hedgeLeg2Price > 0) {
-      hedgeEl.textContent = s.hedgeLeg2Dir.toUpperCase() + ' @ $' + s.hedgeLeg2Price.toFixed(2);
-      hedgeEl.style.color = '#76b7ff';
-    } else if (s.hedgeState === 'leg1_filled') {
-      hedgeEl.textContent = '待触发';
-      hedgeEl.style.color = '#8ea0b8';
-    } else {
-      hedgeEl.textContent = '--';
-      hedgeEl.style.color = '#7a8ea6';
-    }
-  }
   document.getElementById('h-dump').textContent = s.dumpDetected || '未触发';
   // Dump monitor panel
   const dumpSt = document.getElementById('dump-status');
